@@ -14,9 +14,9 @@ ModuleEntry mod = {
   ]
 };
 
-// This is the symbol that the PHP use to load your extension from compiled .so
-// file. It's absolutely necessary to declare it as extern(C) to prevent name
-// mangling.
+// This is the symbol that the PHP search for to load your extension from
+// compiled .so file. It's absolutely necessary to declare it as extern(C) to
+// prevent name mangling.
 extern(C) ModuleEntry* get_module() {
   return &mod;
 }
