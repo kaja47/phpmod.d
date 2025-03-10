@@ -1,0 +1,14 @@
+function mk {
+  gdc-14 -g -shared -fPIC -fpreview=dip1000 -fpreview=dip1008 -march=native phpmod.d "$@"
+}
+
+mk tests/test.d       -o _test.so      && php -d extension=./_test.so   tests/test.php
+#mk examples/api.d     -o _api.so       && php -d extension=./_api.so -r ''
+mk examples/arrays.d   -o _arrays.so   && php -d extension=./_arrays.so tests/arrays.php
+#mk examples/ffi.d     -o _ffi.so       && php -d extension=./_ffi.so    example/ffi.php
+mk examples/popcnt.d  -o _popcnt.so    && php -d extension=./_popcnt.so -r ''
+mk examples/simple.d  -o _simple.so    && php -d extension=./_simple.so tests/simple.php
+mk examples/unpack.d  -o _unpack.so    && php -d extension=./_unpack.so tests/unpack.php
+#mk examples/userland-class.d -o _uc.so && php -d extension=./_uc.so     examples/userland-class.php
+mk examples/writer.d  -o _writer.so  && php -d extension=./_writer.so -r ''
+#mk -I examples/ examples/cmod.d  -o _cmod.so    && php -d extension=./_cmod.so tests/cmod.php

@@ -9,6 +9,7 @@ ModuleEntry mod = {
     func!func1,
     func!func2,
     func!func3,
+    func!funcArgNoName,
     func!funcNullable,
     func!funcNullableReturnTypeString,
     func!funcNullableReturnTypeObject,
@@ -17,15 +18,19 @@ ModuleEntry mod = {
     func!funcArgTypehints,
     func!funcArgTypehintsNullable,
     func!funcArgTypehintsClasses,
+    func!testAcceptObject,
+    func!testReadFieldsOfUserlandObjects,
     func!test,
     func!makeTestResource,
     func!fff,
     func!ggg,
     func!throwException1,
     func!createStringNative,
+    func!passStringNative,
     func!testPackedArray,
     func!testPackedArrayWithHoles,
     func!testHashArray,
+    func!testArrayTypedMixedKeys,
     zend_function_entry(),
   ],
   moduleStartup: (int, int moduleNumber) {
@@ -72,6 +77,8 @@ double func3(uint a = 1, int b = 2, int c = 3) {
   return a + b + c;
 }
 
+void funcArgNoName(int, int, int) {}
+
 bool funcNullable(@nullable Test* obj) {
   return obj == null;
 }
@@ -80,6 +87,8 @@ bool funcNullable(@nullable Test* obj) {
 @nullable zend_object* funcNullableReturnTypeObject() { return null; }
 @nullable HashTable*   funcNullableReturnTypeArray()  { return null; }
 @nullable Test*        funcNullableReturnTypeClass()  { return null; }
+
+bool testAcceptObject(zend_object* obj) { return obj != null; }
 
 void funcArgTypehints(String* str, HashTable* ht, Resource* res, zend_object* obj) {}
 void funcArgTypehintsNullable(@nullable String* str, @nullable HashTable* ht, @nullable Resource* res, @nullable zend_object* obj) {}
@@ -158,17 +167,66 @@ void fff(@(1) @phpClass TestWithConstructor* p) {}
 }
 
 
+long testReadFieldsOfUserlandObjects(ZendObject* o) {
+  zval tmp;
+  return o.readProperty("a", &tmp).toLong;
+}
+
+
 
 // not called from php, just there to check if it compiles
-void arrayIterations(HashTable* ht) {
+void testArrayCompile(HashTable* ht) {
   foreach (kv; ht.byValue) {}
   foreach (kv; ht.byKeyValue) {}
+
+  const(HashTable)* cht = ht;
+  foreach (v;  cht.byValue) {}
+  foreach (kv; cht.byKeyValue) {}
+
+  foreach (uint v; ht.typed) {}
+  foreach (long v; ht.typed) {}
+  foreach (double v; ht.typed) {}
+  foreach (float v; ht.typed) {}
+  foreach (bool v; ht.typed) {}
+  foreach (zend_object* v; ht.typed) {}
+  foreach (HashTable* v; ht.typed) {}
+  foreach (zend_string* v; ht.typed) {}
 
   foreach (int k, int v; ht.typed) {}
   foreach (zval k, int v; ht.typed) {}
   foreach (scope const(char)[] k, int v; ht.typed) {}
   foreach (scope const(ubyte)[] k, int v; ht.typed) {}
   foreach (String* k, int v; ht.typed) {}
+
+  if (auto z = 1 in *ht) {}
+  if (auto z = "asd" in *ht) {}
+  zval* _ = (*ht)[1];
+        _ = (*ht)["asd"];
+
+  auto newHT = HashTable.copy([1,2,3]);
+}
+
+bool testArrayTypedMixedKeys(HashTable* ht, HashTable* packed) {
+  assert(!ht.isPacked);
+  assert(packed.isPacked);
+
+  bool ex = false;
+  try {
+    foreach (const(char)[] k, zval v; ht.typed) {}
+  } catch (Exception e) {
+    ex = true;
+  }
+  if (!ex) return false;
+ 
+  foreach (const(char)[] k, zval v; ht.typedConvertKeys) {
+    if (!(k == "1" || k == "x")) return false;
+  }
+
+  foreach (const(char)[] k, zval v; packed.typedConvertKeys) {
+    if (!(k == "0" || k == "1")) return false;
+  }
+
+  return true;
 }
 
 
@@ -181,6 +239,11 @@ void throwException1() {
 String* createStringNative() {
   return String.copy("test");
 }
+
+String* passStringNative(String* str) {
+  return str.bump();
+}
+
 
 
 bool testPackedArray(HashTable* ht) {
@@ -281,3 +344,6 @@ bool testHashArray(HashTable* ht) {
     _efree(ptr);
   }
 }
+
+
+

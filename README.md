@@ -9,18 +9,7 @@ couple lines of [D](https://dlang.org/) code just like this:
 ```d
 import phpmod;
 
-ModuleEntry mod = {
-  name: "popcnt",
-  version_: "1",
-  functions: [
-    func!popcount,
-    FunctionEntry()
-  ]
-};
-
-extern(C) ModuleEntry* get_module() {
-  return &mod;
-}
+mixin mod!(bitops);
 
 long popcount(long x) {
   import core.bitop : popcnt;
@@ -31,13 +20,13 @@ long popcount(long x) {
 Then compiling that tiny file by simple invocation of your favourite compiler:
 
 ```
-gdc-14 -shared -fPIC -O2 -fpreview=all phpmod.d popcnt.d -o popcount.so
+gdc-14 -shared -fPIC -O2 -fpreview=all phpmod.d bitops.d -o bitops.so
 ```
 
 And finally loading it:
 
 ```
-php -d extension=./popcount.so
+php -d extension=./bitops.so
 ```
 
 All that without ever touching everlasting horrors of C, wrestling with abysmal

@@ -1,34 +1,9 @@
 <?php
 
-/*
-gdc-14 -g -shared -fPIC phpmod.d example/test.d -o test.so && php -d extension=./test.so example/test.php
-*/
+require_once "lib.php";
 
-error_reporting(E_ALL);
 
-$__error = "";
-function recordError() {
-  global $__error;
-  $__error = "";
-  set_error_handler(function ($errno, $errstr) use (&$__error) {
-    $__error = $errstr;
-  });
-}
-function getError() {
-  global $__error;
-  restore_error_handler();
-  return $__error;
-}
-
-function _test($x) {
-  if ($x === true) {
-    var_dump($x);
-  } else {
-    echo "\e[0;31m";
-    var_dump($x);
-    echo "\e[0m";
-  }
-}
+class UserlandClass { public int $a, $b, $c, $d; }
 
 
 
@@ -55,11 +30,25 @@ _test($p->isOptional() === true);
 _test($p->isPassedByReference() === false);
 _test($p->isVariadic() === false);
 
+$f = new ReflectionFunction("func3");
+_test($f->getParameters()[0]->name === 'a');
+_test($f->getParameters()[1]->name === 'b');
+_test($f->getParameters()[2]->name === 'c');
+
+$f = new ReflectionFunction("funcArgNoName");
+_test($f->getParameters()[0]->name === 'arg1');
+_test($f->getParameters()[1]->name === 'arg2');
+_test($f->getParameters()[2]->name === 'arg3');
+
 _test(funcNullable(null) === true);
 _test(funcNullableReturnTypeString() === null);
 _test(funcNullableReturnTypeArray()  === null);
 _test(funcNullableReturnTypeObject() === null);
 _test(funcNullableReturnTypeClass()  === null);
+
+_test(testAcceptObject(new stdClass));
+_test(testAcceptObject(new UserlandClass));
+_test(testAcceptObject(new Test));
 
 
 echo "=== testing type hints\n";
@@ -146,15 +135,14 @@ try {
   _test($e->getMessage() === "Call to undefined method Test::neex()");
 }
 
-recordError();
-_test($t->neex === null);
-_test(getError() === 'Undefined property: Test::$neex');
+_testError(function () use ($t) {
+  _test($t->neex === null);
+}, 'Undefined property: Test::$neex');
 
-recordError();
+_testError(function () use ($t) {
 $t->neex = 1;
 _test($t->neex === 1);
-_test(getError() === 'Creation of dynamic property Test::$neex is deprecated');
-
+}, 'Creation of dynamic property Test::$neex is deprecated');
 
 
 $t = new TestWithConstructor(10, 20);
@@ -165,6 +153,21 @@ $r = new ReflectionClass("TestWithPHPConstructor");
 _test(count($r->getMethods()) === 3);
 
 _test(new TestWithPHPConstructor(100)->get() === 100);
+
+
+
+class ABC {
+  public int $a = 1;
+  function fff(int $a) { return $a + 1; }
+}
+$a = new ABC();
+_test(testReadFieldsOfUserlandObjects($a) === 1);
+_test(testReadFieldsOfUserlandObjects((object)['a' => 1]) === 1);
+//_testError(testReadFieldsOfUserlandObjects(new stdClass));
+
+
+
+echo "=== testing callbacks\n";
 
 
 
@@ -179,11 +182,14 @@ _test(testPackedArray($arr));
 unset($arr[0]);
 _test(testPackedArrayWithHoles($arr));
 
-
 $arr['x'] = 0;
 unset($arr['x']);
 _test(testHashArray($arr));
-die;
+
+
+$arr = [1 => '', 'x' => ''];
+$packed = [1,2];
+_test(testArrayTypedMixedKeys($arr, $packed));
 
 
 
@@ -210,6 +216,12 @@ _test(rc(createStringPHP()) === rc(createStringNative()));
 $a = createStringPHP();
 $b = createStringNative();
 _test(rc($a) === rc($b));
+
+function passString(string $a) { return $a; }
+$a = '_'.$argv[0];;
+$b = '_'.$argv[0];;
+_test(rc(passString($a)) == rc(passStringNative($b)));
+
 
 
 $arr = null;

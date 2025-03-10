@@ -20,6 +20,7 @@ extern(C) ModuleEntry* get_module() {
 
 @phpClass struct Writer {
   int fd = -1;
+  // PHP object have to end by this zend_object field.
   zend_object std;
 
   // PHP constructor can be also implemented by a native function called
@@ -39,11 +40,11 @@ extern(C) ModuleEntry* get_module() {
 
   long pwrite(scope const(ubyte)[] str, long offset) {
     // any exception thrown in native code is caught by auto-generated wrapper
-    // and rethrown to PHP a a PHP exception
+    // and rethrown to PHP as a PHP exception
     if (fd == -1) throw new Exception("file not open");
     auto rc = .pwrite(fd, str.ptr, str.length, offset);
-    // PHPException is class specialized for messages provided as zero
-    // terminated char*
+    // PHPException is class specialized for messages provided as
+    // zero-terminated char*
     if (rc == -1) throw new PHPException(strerror(errno));
     return rc;
   }
