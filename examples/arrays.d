@@ -20,7 +20,7 @@ HashTable* array_flatten(HashTable* aa) {
   scope(failure) res.release();
 
   foreach (HashTable* a; aa.typed) {
-    foreach (z; aa.byValue) {
+    foreach (z; a.byValue) {
       res.append(z);
       z.bump();
     }
