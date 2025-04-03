@@ -3,16 +3,20 @@
 require_once "lib.php";
 
 
-class UserlandClass { public int $a, $b, $c, $d; }
+class UserspaceClass { public int $a, $b, $c, $d; }
 
 
+echo "=== testing functions\n";
 
 _test(0.0 === func0());
 _test(1.0 === func1(1));
 _test(2.0 === func2(1,1));
 
+_test(funcReturnVoid() === null);
+$f = new ReflectionFunction("funcReturnVoid");
+_test($f->getReturnType() === null);
 
-echo "=== testing functions\n";
+
 $f = new ReflectionFunction("func1");
 _test($f->getNumberOfParameters() === 1);
 _test($f->getNumberOfRequiredParameters() === 0);
@@ -40,6 +44,11 @@ _test($f->getParameters()[0]->name === 'arg1');
 _test($f->getParameters()[1]->name === 'arg2');
 _test($f->getParameters()[2]->name === 'arg3');
 
+$f = new ReflectionFunction("funcMixed");
+_test($f->getParameters()[0]->getType() === null);
+_test($f->getParameters()[1]->getType() === null);
+_test($f->getReturnType() === null);
+
 _test(funcNullable(null) === true);
 _test(funcNullableReturnTypeString() === null);
 _test(funcNullableReturnTypeArray()  === null);
@@ -47,8 +56,36 @@ _test(funcNullableReturnTypeObject() === null);
 _test(funcNullableReturnTypeClass()  === null);
 
 _test(testAcceptObject(new stdClass));
-_test(testAcceptObject(new UserlandClass));
+_test(testAcceptObject(new UserspaceClass));
 _test(testAcceptObject(new Test));
+
+_test(funcVariadic0()      === 0);
+_test(funcVariadic0(1)     === 1);
+_test(funcVariadic0(1,2)   === 2);
+_test(funcVariadic0(1,2,3) === 3);
+$f = new ReflectionFunction("funcVariadic0");
+_test($f->getParameters()[0]->isVariadic() === true);
+_test($f->getParameters()[0]->getType() === null);
+
+_test(funcVariadic1(false)        === 0);
+_test(funcVariadic1(false, 1)     === 1);
+_test(funcVariadic1(false, 1,2)   === 2);
+_test(funcVariadic1(false, 1,2,3) === 3);
+
+
+_test(funcVariadicLong() === 0);
+_test(funcVariadicLong(1,2,3) === 6);
+
+
+
+// too much arguments
+_testThrows(function () {
+  test0(1);
+});
+_testThrows(function () {
+  new C0(1,2,3,4,5);
+});
+
 
 
 echo "=== testing type hints\n";
@@ -118,11 +155,11 @@ _test(count($r->getMethods()) === 3);
 
 $r = new ReflectionClass("TestWithConstructor");
 _test($r->getConstructor() !== null);
-_test(count($r->getMethods()) === 3); // ctor+dtor+1
+_test(count($r->getMethods()) === 2); // ctor+1
 
 $r = new ReflectionClass("TestWithPHPConstructor");
 _test($r->getConstructor() !== null);
-_test(count($r->getMethods()) === 3); // ctor+dtor+1
+_test(count($r->getMethods()) === 2); // ctor+1
 
 $t = new Test();
 _test($t->method() === 10);
@@ -150,7 +187,7 @@ _test($t->method() === 30);
 
 
 $r = new ReflectionClass("TestWithPHPConstructor");
-_test(count($r->getMethods()) === 3);
+_test(count($r->getMethods()) === 2); // ctor+1
 
 _test(new TestWithPHPConstructor(100)->get() === 100);
 
@@ -168,7 +205,7 @@ _test(testReadFieldsOfUserlandObjects((object)['a' => 1]) === 1);
 
 
 echo "=== testing callbacks\n";
-
+echo "=== testing iterators\n";
 
 
 echo "=== testing arrays\n";
@@ -194,17 +231,25 @@ _test(testArrayTypedMixedKeys($arr, $packed));
 
 
 echo "=== testing exceptions\n";
-$_thrown = false;
-try {
+_testThrowsMessage(function() {
   throwException1();
-} catch (Exception $e) {
-  _test(str_starts_with($e->getMessage(), 'exception ('));
-  $_thrown = true;
-} finally {
-  if (!$_thrown) {
-    _test(false);
-  }
-}
+}, '/^exception \(/');
+
+_testThrowsMessage(function() {
+  returnExceptionVoid();
+}, "/returnedException/");
+
+_testThrowsMessage(function() {
+  returnExceptionInt();
+}, "/returnedException/");
+
+_test(returnSuccessInt() === 1);
+
+$f = new ReflectionFunction("returnExceptionVoid");
+_test($f->getReturnType() === null);
+$f = new ReflectionFunction("returnExceptionInt");
+_test((string)$f->getReturnType() === "int");
+
 
 
 
@@ -218,9 +263,10 @@ $b = createStringNative();
 _test(rc($a) === rc($b));
 
 function passString(string $a) { return $a; }
-$a = '_'.$argv[0];;
-$b = '_'.$argv[0];;
-_test(rc(passString($a)) == rc(passStringNative($b)));
+$a = '_'.$argv[0];
+$b = '_'.$argv[0];
+_test(rc(passString($a)) === rc(passStringNative($b)));
+
 
 
 
@@ -228,7 +274,7 @@ $arr = null;
 $n = memory_get_usage();
 $arr = [];
 for ($i = 1; $i <= 10; $i++) {
-  $arr[] = new C0($i);
+  $arr[] = new C0();
 }
 $arr = null;
 _test($n === memory_get_usage());

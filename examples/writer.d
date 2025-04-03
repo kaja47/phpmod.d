@@ -20,7 +20,7 @@ extern(C) ModuleEntry* get_module() {
 
 @phpClass struct Writer {
   int fd = -1;
-  // PHP object have to end by this zend_object field.
+  // PHP object has to end by zend_object field.
   zend_object std;
 
   // PHP constructor can be also implemented by a native function called

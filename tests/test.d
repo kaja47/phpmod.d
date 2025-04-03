@@ -9,8 +9,13 @@ ModuleEntry mod = {
     func!func1,
     func!func2,
     func!func3,
+    func!funcReturnVoid,
     func!funcArgNoName,
+    func!funcMixed,
     func!funcNullable,
+    func!funcVariadic0,
+    func!funcVariadic1,
+    func!funcVariadicLong,
     func!funcNullableReturnTypeString,
     func!funcNullableReturnTypeObject,
     func!funcNullableReturnTypeArray,
@@ -25,6 +30,9 @@ ModuleEntry mod = {
     func!fff,
     func!ggg,
     func!throwException1,
+    func!returnExceptionVoid,
+    func!returnExceptionInt,
+    func!returnSuccessInt,
     func!createStringNative,
     func!passStringNative,
     func!testPackedArray,
@@ -39,7 +47,8 @@ ModuleEntry mod = {
     registerClass!TestWithPHPConstructor;
     registerClass!C0;
     registerClass!BigClass;
-    registerResource!TestResource(moduleNumber, (Resource*) { });
+    registerResource!TestResource(moduleNumber);
+
     return Result.SUCCESS;
   }
 };
@@ -63,6 +72,8 @@ int rc(zval* zval) {
 }
 
 
+
+
 double func0() {
   return 0;
 }
@@ -77,10 +88,25 @@ double func3(uint a = 1, int b = 2, int c = 3) {
   return a + b + c;
 }
 
+void funcReturnVoid() {}
+
 void funcArgNoName(int, int, int) {}
+
+zval funcMixed(zval a, zval* b) { return a; }
 
 bool funcNullable(@nullable Test* obj) {
   return obj == null;
+}
+
+bool testAcceptObject(zend_object* obj) { return obj != null; }
+
+long funcVariadic0(zval[] args ...) { return args.length; }
+long funcVariadic1(bool, zval[] args ...) { return args.length; }
+
+long funcVariadicLong(long[] args ...) {
+  long sum;
+  foreach (x; args) sum += x;
+  return sum;
 }
 
 @nullable String*      funcNullableReturnTypeString() { return null; }
@@ -88,7 +114,6 @@ bool funcNullable(@nullable Test* obj) {
 @nullable HashTable*   funcNullableReturnTypeArray()  { return null; }
 @nullable Test*        funcNullableReturnTypeClass()  { return null; }
 
-bool testAcceptObject(zend_object* obj) { return obj != null; }
 
 void funcArgTypehints(String* str, HashTable* ht, Resource* res, zend_object* obj) {}
 void funcArgTypehintsNullable(@nullable String* str, @nullable HashTable* ht, @nullable Resource* res, @nullable zend_object* obj) {}
@@ -97,15 +122,15 @@ void funcArgTypehintsClasses(Test* a, @nullable Test* b, @phpClass TestWithConst
 
 void test() {
   //import std.stdio;
-  //writeln(zval(1).type,   " == ", Type.IsLong);
-  //writeln(zval(1U).type,  " == ", Type.IsLong);
-  //writeln(zval(1L).type,  " == ", Type.IsLong);
-  //writeln(zval(1LU).type, " == ", Type.IsLong);
+  //writeln(zval(1).type,   " == ", Type.Long);
+  //writeln(zval(1U).type,  " == ", Type.Long);
+  //writeln(zval(1L).type,  " == ", Type.Long);
+  //writeln(zval(1LU).type, " == ", Type.Long);
   //
-  //writeln(zval(0).type,   " == ", Type.IsLong);
-  //writeln(zval(0U).type,  " == ", Type.IsLong);
-  //writeln(zval(0L).type,  " == ", Type.IsLong);
-  //writeln(zval(0LU).type, " == ", Type.IsLong);
+  //writeln(zval(0).type,   " == ", Type.Long);
+  //writeln(zval(0U).type,  " == ", Type.Long);
+  //writeln(zval(0L).type,  " == ", Type.Long);
+  //writeln(zval(0LU).type, " == ", Type.Long);
 }
 
 @phpResource struct TestResource {
@@ -113,7 +138,7 @@ void test() {
 }
 
 TestResource* makeTestResource() {
-  auto tr = emalloc!TestResource;
+  auto tr = allocateResource!TestResource();
   *tr = TestResource(1, 2, 3, 4);
   return tr;
 }
@@ -177,10 +202,12 @@ long testReadFieldsOfUserlandObjects(ZendObject* o) {
 // not called from php, just there to check if it compiles
 void testArrayCompile(HashTable* ht) {
   foreach (kv; ht.byValue) {}
+  foreach (kv; ht.byKey) {}
   foreach (kv; ht.byKeyValue) {}
 
   const(HashTable)* cht = ht;
   foreach (v;  cht.byValue) {}
+  foreach (v;  cht.byKey) {}
   foreach (kv; cht.byKeyValue) {}
 
   foreach (uint v; ht.typed) {}
@@ -192,8 +219,9 @@ void testArrayCompile(HashTable* ht) {
   foreach (HashTable* v; ht.typed) {}
   foreach (zend_string* v; ht.typed) {}
 
-  foreach (int k, int v; ht.typed) {}
+  foreach (int k,  int v; ht.typed) {}
   foreach (zval k, int v; ht.typed) {}
+  foreach (Key k,  int v; ht.typed) {}
   foreach (scope const(char)[] k, int v; ht.typed) {}
   foreach (scope const(ubyte)[] k, int v; ht.typed) {}
   foreach (String* k, int v; ht.typed) {}
@@ -235,6 +263,10 @@ void throwException1() {
   throw new Exception(nonZeroTerminated[0 .. 9]);
 }
 
+Try!void returnExceptionVoid() { return failure("returnedException"); }
+Try!int returnExceptionInt()   { return failure!int("returnedException"); }
+Try!int returnSuccessInt()     { return success(1); }
+
 
 String* createStringNative() {
   return String.copy("test");
@@ -253,15 +285,15 @@ bool testPackedArray(HashTable* ht) {
     int n;
     foreach (zval* z; ht.byValue) {
       n++;
-      if (z.type != Type.IsLong) return false;
+      if (z.type != Type.Long) return false;
     }
     if (n != 5) return false;
   }
   {
     int n;
     foreach (kv; ht.byKeyValue) {
-      if (kv.key.type != Type.IsLong) return false;
-      if (kv.value.type != Type.IsLong) return false;
+      if (kv.key.type != Type.Long) return false;
+      if (kv.value.type != Type.Long) return false;
       if (kv.key.lval != n) return false;
       n++;
     }
@@ -277,15 +309,15 @@ bool testPackedArrayWithHoles(HashTable* ht) {
     int n;
     foreach (zval* z; ht.byValue) {
       n++;
-      if (z.type != Type.IsLong) return false;
+      if (z.type != Type.Long) return false;
     }
     if (n != 4) return false;
   }
   {
     int n;
     foreach (kv; ht.byKeyValue) {
-      if (kv.key.type != Type.IsLong) return false;
-      if (kv.value.type != Type.IsLong) return false;
+      if (kv.key.type != Type.Long) return false;
+      if (kv.value.type != Type.Long) return false;
       if (kv.key.lval != n + 1) return false;
       n++;
     }
@@ -300,15 +332,15 @@ bool testHashArray(HashTable* ht) {
     int n;
     foreach (zval* z; ht.byValue) {
       n++;
-      if (z.type != Type.IsLong) return false;
+      if (z.type != Type.Long) return false;
     }
     if (n != 4) return false;
   }
   {
     int n;
     foreach (kv; ht.byKeyValue) {
-      if (kv.key.type != Type.IsLong) return false;
-      if (kv.value.type != Type.IsLong) return false;
+      if (kv.key.type != Type.Long) return false;
+      if (kv.value.type != Type.Long) return false;
       n++;
     }
     if (n != 4) return false;
@@ -344,6 +376,3 @@ bool testHashArray(HashTable* ht) {
     _efree(ptr);
   }
 }
-
-
-

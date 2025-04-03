@@ -29,3 +29,13 @@ function _testThrows($f) {
   }
   _test($throws);
 }
+function _testThrowsMessage($f, string $regex) {
+  $throws = false;
+  try {
+    $f();
+  } catch (Throwable $e) {
+    $throws = true;
+  }
+  _test($throws);
+  _test(preg_match($regex, $e->getMessage()) === 1);
+}
