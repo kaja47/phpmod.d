@@ -32,6 +32,12 @@ struct NotClass {
   int a;
 }
 
+struct Native {
+  int a, b, c;
+}
+
+alias ClassN = Class!(Native, "TypeN");
+
 @phpResource
 struct ResX {
   int a, b, c, d;
@@ -43,3 +49,12 @@ struct ResX {
 ResX* makeResource() {
   return emalloc!ResX;
 }
+
+
+// public enums are automatically exported as PHP constants
+enum ENUM_CONST = 1;
+private enum NOT_CONST_PRIVATE = ~0;
+immutable NOT_CONST_IMMUTABLE = 4;
+
+@phpConstant
+int FUNC_CONST() @nogc nothrow => 1 + 1;

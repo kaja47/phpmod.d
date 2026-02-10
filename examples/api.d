@@ -2,12 +2,15 @@ import phpmod;
 
 // Mixing in the `mod` template do the magic of auto-extension (template
 // parameter is the module, usually the same as the file name) - it exposes
-// every public function as a PHP function and every struct annotated by
-// @phpClass attribute as PHP class.
+// every public function as a PHP function, every struct annotated by
+// @phpClass attribute as PHP class and every public enum as PHP constant.
 // When more control over specifics is desired, it's possible to define
 // zend_module_entry structure and get_module() symbol manually (see
 // example/popcnt.d and example/writer.d).
 mixin mod!api;
+
+
+// === argument types ===
 
 // This will be wrapped to a PHP function that accepts integer value and
 // returns null. No type conversion are ever performed, PHP value has to be
@@ -101,5 +104,75 @@ void args13(zval* x, zval y) {}
 // declaration.
 auto args14(int a = 1, int b = 3) {}
 
-// Variadic arguments are also supported.
+// Variadic arguments are also supported (but only the typesafe D-style
+// variadics, not the C-style ones).
 void args15(zval[] args...) {}
+
+// Intersection of multiple basic types can be specified via TypedZval.
+alias LongOrString = TypedZval!(long, zend_string*);
+// Following function accepts PHP integer or string.
+void args16(LongOrString arg) {
+  // TypedZval can be automatically converted to zval
+  zval z = arg;
+  // TypedZval behaves as if it's zval.
+  if (arg.type == Type.Long) {
+    long l = arg.lval;
+  }
+}
+
+
+// === return types ===
+
+// Return type can be one of those:
+// - scalar types: void, integral types (without ulong), float, double, bool
+// - PHP types: zval, zend_string*, zend_resource*, zend_object*, HashTable*
+// - pointers to types annotated by @phpClass, @phpResource or @FFI
+// - Try!T
+int retval1() { return 1; }
+
+// When function throws, the exception is caught and rethrown into PHP.
+int retval2() { throw new Exception("native exception"); }
+
+// Type Try can be used when we want to avoid exceptions. Function `success`
+// returns wrapped value.
+Try!int retval3() { return success(1); }
+
+// Function failure causes wrapped function to throw new exception to PHP.
+Try!int retval4() { return failure!int("also an exception"); }
+
+// Function returning zval is the most general case equivalent to PHP usespace
+// function with `mixed` return type annotation. In situations when we need to
+// return multiple types but we wish to be more specific, we can use TypedZval.
+// This will generate proper type signatures stored in arginfo structures and
+// reachable by reflection.
+alias LongOrBool = TypedZval!(long, bool);
+LongOrBool retval5() {
+  return LongOrBool(1);
+}
+
+
+
+
+HashTable* refcount1(HashTable* ht) {
+  return bump(ht);
+}
+
+// bump will do the right thing.
+zval* refcount2(zval* z) {
+  return bump(z);
+}
+
+// There's no need to increment refcount for newly created strings, objects,
+// arrays or resources if we only return them and not retain reference to them.
+// They already have their refcount set to 1.
+ZendString* refcount3() {
+  return ZendString.copy("string");
+}
+
+
+
+// TODO
+// @phpClass
+// Callable, iterator
+// bump() and release()
+// recommendation: pragma(inline, true), nothrow, auto

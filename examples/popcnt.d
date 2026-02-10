@@ -1,6 +1,5 @@
 // import the library (it's just one file)
-import phpmod; 
-
+import phpmod;
 import core.bitop : popcnt;
 
 // declare the module
@@ -14,7 +13,7 @@ ModuleEntry mod = {
     func!popcount_string,
     func!same_bits_string,
     // Last entry has to be empty function entry (PHP gang say so).
-    FunctionEntry() 
+    FunctionEntry()
   ]
 };
 

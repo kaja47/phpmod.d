@@ -17,10 +17,10 @@ HashTable* unpack_array(scope const(char)[] pattern, scope const(char)[] str, lo
   auto result = HashTable.alloc(pattern.length, packed: true);
   // if anything throws we need to deallocate this array
   scope(failure) release(result);
-  // cast to byte array to bypass automatic unicode string decoding
+  // cast to byte array to bypass utf-8 string autodecoding
   foreach (p; cast(const(ubyte)[]) pattern) {
     auto res = _unpack(p, str, offset);
-    result.append(&res);
+    result.append(res);
   }
   return result;
 }
@@ -49,7 +49,7 @@ private zval _unpack(char p, scope const(char)[] str, ref long offset) {
 private enum Endian { Little, Big }
 
 pragma(inline, true)
-private zval chomp(alias E, T)(scope const(char)[] str, ref long offset) {
+private zval chomp(alias Endian E, T)(scope const(char)[] str, ref long offset) {
   if (str.length < offset + T.sizeof) throw new Exception("string too short");
 
   static if (T.sizeof == 1) {

@@ -12,10 +12,19 @@ ModuleEntry mod = {
     func!funcReturnVoid,
     func!funcArgNoName,
     func!funcMixed,
+    func!funcReturnLongOrBool,
+    func!funcArgLongOrBool,
     func!funcNullable,
     func!funcVariadic0,
     func!funcVariadic1,
     func!funcVariadicLong,
+    func!funcVariadicInt,
+    func!funcVariadicShort,
+    func!funcVariadicUbyte,
+    func!funcVariadicBool,
+    func!funcVariadicFloat,
+    func!funcVariadicString,
+    func!funcVariadicXY,
     func!funcNullableReturnTypeString,
     func!funcNullableReturnTypeObject,
     func!funcNullableReturnTypeArray,
@@ -23,9 +32,13 @@ ModuleEntry mod = {
     func!funcArgTypehints,
     func!funcArgTypehintsNullable,
     func!funcArgTypehintsClasses,
+    func!funcArgAutoClass,
     func!testAcceptObject,
-    func!testReadFieldsOfUserlandObjects,
-    func!test,
+    func!testReadFieldsOfUserspaceObjects,
+    func!funcCallNoArgsMethod,
+    func!funcCallNoArgsMethodTyped,
+    func!funcCallThrowsMethod,
+    func!testBasics,
     func!makeTestResource,
     func!fff,
     func!ggg,
@@ -35,10 +48,12 @@ ModuleEntry mod = {
     func!returnSuccessInt,
     func!createStringNative,
     func!passStringNative,
+    func!testAutozvals,
     func!testPackedArray,
     func!testPackedArrayWithHoles,
     func!testHashArray,
     func!testArrayTypedMixedKeys,
+    func!testArrayIterationIntValues,
     zend_function_entry(),
   ],
   moduleStartup: (int, int moduleNumber) {
@@ -47,7 +62,15 @@ ModuleEntry mod = {
     registerClass!TestWithPHPConstructor;
     registerClass!C0;
     registerClass!BigClass;
+    registerClass!ClassT;
+    registerClass!ClassTNamed;
     registerResource!TestResource(moduleNumber);
+
+    registerConstant!ENUM_CONST(moduleNumber);
+    registerConstant!IMMUTABLE_CONST(moduleNumber);
+    registerConstant!(funcConst, "FUNC_CONST")(moduleNumber);
+    registerClass!ClassWithConstants;
+    registerClass!XY0;
 
     return Result.SUCCESS;
   }
@@ -72,6 +95,21 @@ int rc(zval* zval) {
 }
 
 
+enum ENUM_CONST = 1;
+immutable IMMUTABLE_CONST = 2;
+auto funcConst() {
+  return 3;
+}
+
+@phpClass
+struct ClassWithConstants {
+  enum BOOL_C = true;
+  enum INT_C = 1;
+  enum DOUBLE_C = 1.0;
+  enum STR_C = "1";
+
+  zend_object obj;
+}
 
 
 double func0() {
@@ -94,6 +132,20 @@ void funcArgNoName(int, int, int) {}
 
 zval funcMixed(zval a, zval* b) { return a; }
 
+
+alias LongOrBool = TypedZval!(long, bool);
+LongOrBool funcReturnLongOrBool() {
+  // test if all this compiles
+  return LongOrBool(1);
+  return LongOrBool(ubyte(1));
+  return LongOrBool(true);
+}
+LongOrBool funcArgLongOrBool(LongOrBool arg) nothrow {
+  //zval z = arg; // test if compiles
+  return arg;
+}
+
+
 bool funcNullable(@nullable Test* obj) {
   return obj == null;
 }
@@ -103,11 +155,37 @@ bool testAcceptObject(zend_object* obj) { return obj != null; }
 long funcVariadic0(zval[] args ...) { return args.length; }
 long funcVariadic1(bool, zval[] args ...) { return args.length; }
 
-long funcVariadicLong(long[] args ...) {
+private auto sum(T)(T[] args) {
+  static if (is(T == float)) {
+    float res = 0;
+  } else {
+    long res;
+  }
+  foreach (x; args) res += x;
+  return res;
+}
+
+long funcVariadicLong(long[] args ...)   => sum(args);
+long funcVariadicInt  (int[] args ...)   => sum(args);
+long funcVariadicShort(short[] args ...) => sum(args);
+long funcVariadicUbyte(ubyte[] args ...) => sum(args);
+long funcVariadicBool (bool[] args ...)  => sum(args);
+float funcVariadicFloat(float[] args ...) => sum(args);
+long funcVariadicString(zend_string*[] args ...) => args.length;
+
+@phpClass struct XY0 {
+  private int x,y; zend_object _z;
+  this(int x, int y) { this.x = x; this.y = y; }
+}
+
+long funcVariadicXY(XY0*[] args ...) {
   long sum;
-  foreach (x; args) sum += x;
+  foreach (xy; args) {
+    sum += xy.x + xy.y;
+  }
   return sum;
 }
+
 
 @nullable String*      funcNullableReturnTypeString() { return null; }
 @nullable zend_object* funcNullableReturnTypeObject() { return null; }
@@ -117,20 +195,25 @@ long funcVariadicLong(long[] args ...) {
 
 void funcArgTypehints(String* str, HashTable* ht, Resource* res, zend_object* obj) {}
 void funcArgTypehintsNullable(@nullable String* str, @nullable HashTable* ht, @nullable Resource* res, @nullable zend_object* obj) {}
-void funcArgTypehintsClasses(Test* a, @nullable Test* b, @phpClass TestWithConstructor* c, @nullable @phpClass TestWithConstructor* d) {}
+void funcArgTypehintsClasses(Test* a, @nullable Test* b, TestWithConstructor* c, @nullable TestWithConstructor* d) {}
 
 
-void test() {
-  //import std.stdio;
-  //writeln(zval(1).type,   " == ", Type.Long);
-  //writeln(zval(1U).type,  " == ", Type.Long);
-  //writeln(zval(1L).type,  " == ", Type.Long);
-  //writeln(zval(1LU).type, " == ", Type.Long);
-  //
-  //writeln(zval(0).type,   " == ", Type.Long);
-  //writeln(zval(0U).type,  " == ", Type.Long);
-  //writeln(zval(0L).type,  " == ", Type.Long);
-  //writeln(zval(0LU).type, " == ", Type.Long);
+bool testBasics() {
+  assert(zval(1).type        == Type.Long);
+  assert(zval(1U).type       == Type.Long);
+  assert(zval(1L).type       == Type.Long);
+  assert(zval(1LU).type      == Type.Long);
+  assert(zval(0).type        == Type.Long);
+  assert(zval(0U).type       == Type.Long);
+  assert(zval(0L).type       == Type.Long);
+  assert(zval(0LU).type      == Type.Long);
+  assert(zval(ubyte(1)).type == Type.Long);
+  assert(zval(byte(1)).type  == Type.Long);
+  assert(zval(true).type     == Type.True);
+  assert(zval(false).type    == Type.False);
+  assert(zval(0.0f).type     == Type.Double);
+  assert(zval(0.0).type      == Type.Double);
+  return true;
 }
 
 @phpResource struct TestResource {
@@ -160,9 +243,33 @@ TestResource* makeTestResource() {
   }
 
   void selfType(Test*) {}
+
+  long methodVariadic(zval[] args ...) { return args.length; }
+  long methodVariadic2(int a, zval[] args ...) { return args.length; }
+  long methodDefaultArgument(long arg = 1337) { return arg; }
+  bool methodNullableArgument(@nullable Test* arg) { return arg == null; }
 }
 
+struct NativeStruct {
+  private int _x, _y, _z = 1;
+  this(int x, int y, int z) {
+    _x = x;
+    _y = y;
+    _z = z;
+  }
+  long x() => _x;
+  long y() => _y;
+  long z() => _z;
+}
 
+alias ClassT = Class!NativeStruct;
+void funcArgAutoClass(ClassT* arg) {}
+
+struct NativeStruct2 { int a; }
+alias ClassTNamed = Class!(NativeStruct2, "NativeStructRenamed");
+
+
+@phpClass
 struct TestWithConstructor {
   int a, b;
   zend_object std;
@@ -192,10 +299,32 @@ void fff(@(1) @phpClass TestWithConstructor* p) {}
 }
 
 
-long testReadFieldsOfUserlandObjects(ZendObject* o) {
+long testReadFieldsOfUserspaceObjects(ZendObject* o) {
   zval tmp;
   return o.readProperty("a", &tmp).toLong;
 }
+
+zval* funcCallNoArgsMethod(ZendObject* o) {
+  zval tmp;
+  zval* res = o.callMethod("noArgs", &tmp);
+  return res;
+}
+
+long funcCallNoArgsMethodTyped(ZendObject* o) {
+  return o.call!("noargs", long);
+}
+
+ZendString* funcCallThrowsMethod(ZendObject* o) {
+  try {
+    o.call!("throws", long);
+  } catch (PHPException e) {
+    import core.stdc.stdio;
+    printf("%s\n", e.msg.ptr);
+    return bump(e.owner);
+  }
+  return ZendString.copy("nothrow");
+}
+
 
 
 
@@ -210,15 +339,20 @@ void testArrayCompile(HashTable* ht) {
   foreach (v;  cht.byKey) {}
   foreach (kv; cht.byKeyValue) {}
 
+  // values
   foreach (uint v; ht.typed) {}
   foreach (long v; ht.typed) {}
   foreach (double v; ht.typed) {}
   foreach (float v; ht.typed) {}
   foreach (bool v; ht.typed) {}
+  foreach (scope const(char)[] v; ht.typed) {}
+  foreach (scope const(ubyte)[] v; ht.typed) {}
   foreach (zend_object* v; ht.typed) {}
   foreach (HashTable* v; ht.typed) {}
   foreach (zend_string* v; ht.typed) {}
+  foreach (Test* v; ht.typed) {}
 
+  // keys
   foreach (int k,  int v; ht.typed) {}
   foreach (zval k, int v; ht.typed) {}
   foreach (Key k,  int v; ht.typed) {}
@@ -245,7 +379,7 @@ bool testArrayTypedMixedKeys(HashTable* ht, HashTable* packed) {
     ex = true;
   }
   if (!ex) return false;
- 
+
   foreach (const(char)[] k, zval v; ht.typedConvertKeys) {
     if (!(k == "1" || k == "x")) return false;
   }
@@ -255,6 +389,10 @@ bool testArrayTypedMixedKeys(HashTable* ht, HashTable* packed) {
   }
 
   return true;
+}
+
+void testArrayIterationIntValues(HashTable* ht) {
+  foreach (int i; ht.typed) {}
 }
 
 
@@ -274,6 +412,11 @@ String* createStringNative() {
 
 String* passStringNative(String* str) {
   return str.bump();
+}
+
+void testAutozvals(zval* arg) {
+  if (!arg.isRefcounted) throw new Exception("test is useless when zval points to something not refcounted");
+  autozval z = arg.bump();
 }
 
 

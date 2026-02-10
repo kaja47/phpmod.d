@@ -1,5 +1,6 @@
 import phpmod;
-@nogc nothrow:
+//@nogc:
+nothrow:
 
 mixin mod!noruntime;
 
@@ -14,10 +15,22 @@ ZendString* f2() {
 }
 
 void f3(HashTable* ht) {
+  foreach (k; ht.byKey) {}
+  foreach (v; ht.byValue) {}
   foreach (kv; ht.byKeyValue) {}
 }
 
-void f4(ClassX* a, ResourceY* b) {}
+void f4(HashTable* ht) {
+  foreach (Try!long v; ht.typed) {}
+  foreach (Try!bool v; ht.typed) {}
+  foreach (Try!(TypedZval!(bool, long)) v; ht.typed) {}
+  foreach (zval v; ht.typed) {}
+  foreach (zval* v; ht.typed) {}
+
+  foreach (zval k, zval v; ht.typed) {}
+  foreach (Key k, Try!long v; ht.typed) {}
+  foreach (Try!long k, zval v; ht.typed) {}
+}
 
 @phpClass struct ClassX {
   int a;

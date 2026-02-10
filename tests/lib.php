@@ -2,9 +2,19 @@
 
 error_reporting(E_ALL);
 
+function test($name, $x) {
+  if ($x === true) {
+    echo "pass $name\n";
+  } else {
+    echo "\e[0;31m";
+    echo "fail $name\n";
+    var_dump($x);
+    echo "\e[0m";
+  }
+}
 function _test($x) {
   if ($x === true) {
-    var_dump($x);
+    echo "pass\n";
   } else {
     echo "\e[0;31m";
     var_dump($x);

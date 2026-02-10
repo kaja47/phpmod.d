@@ -1,14 +1,24 @@
 PHP=${PHP:-php}
+GDC=${GDC:-gdc-15}
 
-function mk {
-  gdc-14 -O1 -g -shared -fPIC -fpreview=dip1000 -fpreview=dip1008 $DFLAGS -march=native phpmod.d "$@"
+function compile {
+  echo "### $@"
+  $GDC -g -Wall -shared -fPIC -fpreview=dip1000 -fpreview=dip1008 $DFLAGS -march=native phpmod.d "$@"
+  echo
 }
 
-mk tests/test.d       -o _test.so      && $PHP -d extension=./_test.so   tests/test.php
-mk examples/api.d     -o _api.so       && $PHP -d extension=./_api.so -r ''
-mk examples/arrays.d   -o _arrays.so   && $PHP -d extension=./_arrays.so tests/arrays.php
-mk examples/popcnt.d  -o _popcnt.so    && $PHP -d extension=./_popcnt.so -r ''
-mk examples/simple.d  -o _simple.so    && $PHP -d extension=./_simple.so tests/simple.php
-mk examples/unpack.d  -o _unpack.so    && $PHP -d extension=./_unpack.so tests/unpack.php
-mk examples/writer.d  -o _writer.so  && $PHP -d extension=./_writer.so -r ''
-mk -fno-druntime tests/noruntime.d       -o _nr.so      && $PHP -d extension=./_nr.so  -r ''
+mkdir -p build
+
+compile tests/test.d       -o build/test.so      && $PHP -d extension=./build/test.so    tests/test.php
+compile tests/classes.d    -o build/classes.so   && $PHP -d extension=./build/classes.so tests/classes.php
+#compile tests/ffidata.d    -o build/ffi.so       && $PHP -d extension=./build/ffi.so    tests/ffidata.php
+compile examples/api.d     -o build/api.so       && $PHP -d extension=./build/api.so -r ''
+compile examples/arrays.d  -o build/arrays.so    && $PHP -d extension=./build/arrays.so tests/arrays.php
+compile examples/popcnt.d  -o build/popcnt.so    && $PHP -d extension=./build/popcnt.so -r ''
+compile examples/simple.d  -o build/simple.so    && $PHP -d extension=./build/simple.so tests/simple.php
+compile examples/unpack.d  -o build/unpack.so    && $PHP -d extension=./build/unpack.so tests/unpack.php
+compile examples/combinations.d -o build/combs.so
+#compile tests/userland-class.d -o build/uc.so    && $PHP -d extension=./build/uc.so     tests/userland-class.php
+compile examples/writer.d  -o build/writer.so    && $PHP -d extension=./build/writer.so -r ''
+compile -I examples/ examples/cmod.d  -o build/cmod.so && $PHP -d extension=./build/cmod.so tests/cmod.php
+compile -fno-druntime tests/noruntime.d -o build/nr.so && $PHP -d extension=./build/nr.so  -r ''
