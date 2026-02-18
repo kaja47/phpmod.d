@@ -644,13 +644,13 @@ private template DefaultArgStr(alias f, size_t i) {
       enum d = defArgFunc();
       static if (is(typeof(d) : const(char)[])) {
         enum DefaultArgStr = d.stringof;
+      } else static if (is(typeof(d) == bool)) {
+        enum DefaultArgStr = d.stringof;
       } else static if (is(typeof(d) : long)) {
         enum l = long(d);
         enum s = l.stringof[0 .. $-1];
         enum DefaultArgStr = s.ptr;
       } else static if (is(typeof(d) : double)) {
-        enum DefaultArgStr = d.stringof;
-      } else static if (is(typeof(d) == bool)) {
         enum DefaultArgStr = d.stringof;
       } else static assert(0, "cannot handle default values of native type " ~ typeof(d).stringof);
     } else {
@@ -2540,9 +2540,9 @@ template MakeMethod(T, alias string method) {
 
 template MakeConstructor(T) {
   static if (__traits(compiles, T.__ctor)) {
-    private alias argTypes = Parameters!(T.__ctor);
+    static if (is(typeof(T.__ctor) ParamTypes == __parameters)) {}
     pragma(inline, true)
-    static void MakeConstructor(zend_object* obj, scope argTypes args) {
+    static void MakeConstructor(zend_object* obj, scope ParamTypes args) {
       T* _this = cast(T*) ((cast(ubyte*) obj) - T.tupleof[$-1].offsetof);
       //pragma(msg, typeof(_this.__ctor));
       _this.__ctor(args);
