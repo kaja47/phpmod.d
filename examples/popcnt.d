@@ -1,6 +1,7 @@
 // import the library (it's just one file)
 import phpmod;
 import core.bitop : popcnt;
+@nogc:
 
 // declare the module
 ModuleEntry mod = {
@@ -29,7 +30,7 @@ long popcount(long x) {
   return popcnt(x);
 }
 
-long popcount_string(scope const(ubyte)[] str) {
+long popcount_string(scope const(ubyte)[] str) @system {
   size_t i;
   long cnt;
   for (; i + 7 < str.length; i += 8) {
@@ -41,7 +42,7 @@ long popcount_string(scope const(ubyte)[] str) {
   return cnt;
 }
 
-long same_bits_string(scope const(ubyte)[] a, scope const(ubyte)[] b) {
+long same_bits_string(scope const(ubyte)[] a, scope const(ubyte)[] b) @system {
   if (a.length != b.length) throw new Exception("strings must have identical lengths");
   size_t i;
   long cnt = a.length * 8;

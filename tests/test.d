@@ -1,4 +1,5 @@
 import phpmod;
+@nogc:
 
 ModuleEntry mod = {
   name: "test",
@@ -9,6 +10,7 @@ ModuleEntry mod = {
     func!func1,
     func!func2,
     func!func3,
+    func!nsFunc,
     func!funcReturnVoid,
     func!funcArgNoName,
     func!funcMixed,
@@ -32,7 +34,6 @@ ModuleEntry mod = {
     func!funcArgTypehints,
     func!funcArgTypehintsNullable,
     func!funcArgTypehintsClasses,
-    func!funcArgAutoClass,
     func!testAcceptObject,
     func!testReadFieldsOfUserspaceObjects,
     func!funcCallNoArgsMethod,
@@ -60,15 +61,16 @@ ModuleEntry mod = {
     registerClass!Test;
     registerClass!TestWithConstructor;
     registerClass!TestWithPHPConstructor;
+    registerClass!TestConstructorWithDefaultParams;
+    registerClass!TestPHPConstructorWithDefaultParams;
     registerClass!C0;
     registerClass!BigClass;
-    registerClass!ClassT;
-    registerClass!ClassTNamed;
     registerResource!TestResource(moduleNumber);
 
     registerConstant!ENUM_CONST(moduleNumber);
     registerConstant!IMMUTABLE_CONST(moduleNumber);
     registerConstant!(funcConst, "FUNC_CONST")(moduleNumber);
+    registerConstant!NS_CONST(moduleNumber);
     registerClass!ClassWithConstants;
     registerClass!XY0;
 
@@ -100,6 +102,8 @@ immutable IMMUTABLE_CONST = 2;
 auto funcConst() {
   return 3;
 }
+@namespace("NS")
+enum NS_CONST = "NS";
 
 @phpClass
 struct ClassWithConstants {
@@ -125,6 +129,9 @@ double func2(uint a = 1, int b = 2) {
 double func3(uint a = 1, int b = 2, int c = 3) {
   return a + b + c;
 }
+
+@namespace("NS")
+int nsFunc() => 1;
 
 void funcReturnVoid() {}
 
@@ -213,6 +220,15 @@ bool testBasics() {
   assert(zval(false).type    == Type.False);
   assert(zval(0.0f).type     == Type.Double);
   assert(zval(0.0).type      == Type.Double);
+
+  {
+    auto tz = TypedZval!(bool, double)(true);
+    static assert(!__traits(compiles, tz = cast(String*)null));
+    auto b = tz.asBool;
+    auto d = tz.asDouble;
+    auto l = tz.asLong;
+  }
+
   return true;
 }
 
@@ -250,24 +266,6 @@ TestResource* makeTestResource() {
   bool methodNullableArgument(@nullable Test* arg) { return arg == null; }
 }
 
-struct NativeStruct {
-  private int _x, _y, _z = 1;
-  this(int x, int y, int z) {
-    _x = x;
-    _y = y;
-    _z = z;
-  }
-  long x() => _x;
-  long y() => _y;
-  long z() => _z;
-}
-
-alias ClassT = Class!NativeStruct;
-void funcArgAutoClass(ClassT* arg) {}
-
-struct NativeStruct2 { int a; }
-alias ClassTNamed = Class!(NativeStruct2, "NativeStructRenamed");
-
 
 @phpClass
 struct TestWithConstructor {
@@ -298,31 +296,57 @@ void fff(@(1) @phpClass TestWithConstructor* p) {}
   int get() { return a; }
 }
 
+@phpClass
+struct TestConstructorWithDefaultParams {
+  HashTable* arr;
+  zend_object obj;
+  this(int a, int i = 1, bool b = true, double d = 3.0, scope const(char)[] ch = "asd") {
+    arr = HashTable.of(i, b, d, String.copy(ch));
+  }
+  ~this() {
+    release(arr);
+  }
+  void set(int i = 1, bool b = true, double d = 3.0, scope const(char)[] ch = "asd") {
+    release(arr);
+    arr = HashTable.of(i, b, d, String.copy(ch));
+  }
+  HashTable* get() => bump(arr);
+}
+
+@phpClass
+struct TestPHPConstructorWithDefaultParams {
+  HashTable* arr;
+  zend_object obj;
+  void __construct(int i = 1, bool b = true, double d = 3.0, scope const(char)[] ch = "asd") {
+    arr = HashTable.of(i, b, d, String.copy(ch));
+  }
+  void __destruct() {
+    release(arr);
+  }
+  HashTable* get() => bump(arr);
+}
+
 
 long testReadFieldsOfUserspaceObjects(ZendObject* o) {
   zval tmp;
   return o.readProperty("a", &tmp).toLong;
 }
 
-zval* funcCallNoArgsMethod(ZendObject* o) {
+zval funcCallNoArgsMethod(ZendObject* o) {
   zval tmp;
   zval* res = o.callMethod("noArgs", &tmp);
-  return res;
+  return *res;
 }
 
 long funcCallNoArgsMethodTyped(ZendObject* o) {
   return o.call!("noargs", long);
 }
 
-ZendString* funcCallThrowsMethod(ZendObject* o) {
-  try {
-    o.call!("throws", long);
-  } catch (PHPException e) {
-    import core.stdc.stdio;
-    printf("%s\n", e.msg.ptr);
-    return bump(e.owner);
-  }
-  return ZendString.copy("nothrow");
+zval funcCallThrowsMethod(ZendObject* o) @system {
+  auto str = String.copy("xxx");
+  scope(exit) release(str);
+  auto res = o.call!("throws", zval)(str);
+  return res;
 }
 
 
@@ -512,7 +536,7 @@ bool testHashArray(HashTable* ht) {
   ubyte* ptr;
   zend_object std;
 
-  void __construct(int i) {
+  void __construct(int i) @trusted {
     ptr = cast(ubyte*) _emalloc(1 << 20); // 1MB
   }
   void __destruct() {

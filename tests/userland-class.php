@@ -11,7 +11,7 @@ class XYZ {
 
 $c = new XYZ;
 
-_test(readProperties($c));
-//_test(callMethod($c));
+test(__LINE__, readProperties($c));
+//test(__LINE__, callMethod($c));
 
 

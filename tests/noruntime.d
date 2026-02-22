@@ -1,5 +1,5 @@
 import phpmod;
-//@nogc:
+@nogc:
 nothrow:
 
 mixin mod!noruntime;

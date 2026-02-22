@@ -25,14 +25,14 @@ foreach ($blobs as $i => $m) {
 
 $xy = $ffi->new('struct XY');
 
-_test(consumeBlob($blobs[1]) == 1);
-_test(consumeBlobArray($blobs, 1, 3) === 1 + 2 + 3);
+test(__LINE__, consumeBlob($blobs[1]) == 1);
+test(__LINE__, consumeBlobArray($blobs, 1, 3) === 1 + 2 + 3);
 
-_testThrows(fn() => consumeBlob($xy));
-_testThrows(fn() => consumeBlobArray($blobs[0], 0, 1));
+testThrows(__LINE__, fn() => consumeBlob($xy));
+testThrows(__LINE__, fn() => consumeBlobArray($blobs[0], 0, 1));
 
 $f = new ReflectionFunction("consumeBlob");
-_test((string)$f->getParameters()[0]->getType() === "FFI\\CData");
+test(__LINE__, (string)$f->getParameters()[0]->getType() === "FFI\\CData");
 
 $f = new ReflectionFunction("consumeBlobArray");
-_test((string)$f->getParameters()[0]->getType() === "FFI\\CData");
+test(__LINE__, (string)$f->getParameters()[0]->getType() === "FFI\\CData");

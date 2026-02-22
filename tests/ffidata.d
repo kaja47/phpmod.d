@@ -1,6 +1,7 @@
 import phpmod;
 
 mixin mod!ffidata;
+@nogc:
 
 @FFI struct Blob {
   int id;

@@ -1,6 +1,7 @@
 import phpmod;
 
 mixin mod!arrays;
+@nogc:
 
 HashTable* array_merge_values(HashTable* a, HashTable* b) nothrow {
   HashTable* res = HashTable.alloc(a.length + b.length, packed: true);

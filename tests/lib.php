@@ -2,50 +2,53 @@
 
 error_reporting(E_ALL);
 
-function test($name, $x) {
+$passed = $failed = 0;
+
+function test($line, $x) {
+  global $passed, $failed;
   if ($x === true) {
-    echo "pass $name\n";
+    $passed++;
+    //echo "passed $line\n";
   } else {
     echo "\e[0;31m";
-    echo "fail $name\n";
+    echo "failed line $line\n";
     var_dump($x);
     echo "\e[0m";
+    $failed++;
   }
 }
-function _test($x) {
-  if ($x === true) {
-    echo "pass\n";
-  } else {
-    echo "\e[0;31m";
-    var_dump($x);
-    echo "\e[0m";
+function summary() {
+  global $passed, $failed;
+  if ($failed > 0) {
+    echo "$passed passed, $failed failed\n";
   }
+  $passed = $failed = 0;
 }
-function _testError($f, $errstr) {
+function testError($line, $f, $errstr) {
   $__error = "";
   set_error_handler(function ($errno, $errstr) use (&$__error) {
     $__error = $errstr;
   });
   $f();
-  _test($__error === $errstr);
+  test($line, $__error === $errstr);
   restore_error_handler();
 }
-function _testThrows($f) {
+function testThrows($line, $f) {
   $throws = false;
   try {
     $f();
   } catch (Throwable $e) {
     $throws = true;
   }
-  _test($throws);
+  test($line, $throws);
 }
-function _testThrowsMessage($f, string $regex) {
+function testThrowsMessage($line, $f, string $regex) {
   $throws = false;
   try {
     $f();
   } catch (Throwable $e) {
     $throws = true;
   }
-  _test($throws);
-  _test(preg_match($regex, $e->getMessage()) === 1);
+  test($line."throws", $throws);
+  test($line."message", preg_match($regex, $e->getMessage()) === 1);
 }

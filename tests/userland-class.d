@@ -1,6 +1,9 @@
 module userlandClassTest;
 import phpmod;
+
 mixin mod!userlandClassTest;
+@nogc:
+
 
 struct XYZ {
   long x, y, z;

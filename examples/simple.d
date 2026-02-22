@@ -1,14 +1,18 @@
 import phpmod;
 
 mixin mod!(simple, "bitops.mod");
+@nogc:
 
 private import core.bitop;
-private import gcc.builtins;
+private import core.builtins;
+version (LDC) {
+  import ldc.gccbuiltins_x86;
+}
 pragma(inline, true):
 
 auto popcnt(long x)       { return core.bitop.popcnt(x); }
-auto lzcnt(long x)        { return __builtin_ia32_lzcnt_u64(x);; }
-auto tzcnt(long x)        { return __builtin_ia32_tzcnt_u64(x); }
+auto lzcnt(long x)        { return x == 0 ? 64 : bsr(x) ^ 63; } //__builtin_ia32_lzcnt_u64(x);
+auto tzcnt(long x)        { return x == 0 ? 64 : bsf(x); }      //__builtin_ia32_tzcnt_u64(x);
 auto pdep(long x, long y) { return __builtin_ia32_pdep_di(x, y); }
 auto pext(long x, long y) { return __builtin_ia32_pext_di(x, y); }
 
@@ -31,12 +35,6 @@ struct ClassB {
 struct NotClass {
   int a;
 }
-
-struct Native {
-  int a, b, c;
-}
-
-alias ClassN = Class!(Native, "TypeN");
 
 @phpResource
 struct ResX {

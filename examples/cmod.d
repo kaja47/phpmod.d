@@ -1,4 +1,5 @@
 import phpmod;
+@nogc:
 
 // This file shows how we can expose some functions from C while touching only
 // small amount of D.

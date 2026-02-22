@@ -1,16 +1,17 @@
 import phpmod;
 import std.algorithm;
-
 import core.stdc.stdio;
 
 mixin mod!combinations;
+@nogc:
 
-//namespace PHPStanTurbo;
+
+@namespace("Turbo"):
 
 @phpClass struct CombinationsHelper {
   zend_object obj;
 
-  static HashTable* _combinations(HashTable* arrays) {
+  static HashTable* combinations(HashTable* arrays) @system {
     zval*[][] arrs = emallocArray!(zval*[])(arrays.length);
     arrs[] = null;
     int[] positions = emallocArray!int(arrays.length);
@@ -52,7 +53,7 @@ mixin mod!combinations;
 
     foreach (_; 0 .. nResults) {
       auto ht = HashTable.alloc(arrays.length, packed: true);
-      foreach (z; tmp) bump(z);
+      foreach (zval* z; tmp) bump(z);
       ht.fillPacked(tmp);
       result.append(zval(ht));
 

@@ -20,7 +20,13 @@ long popcount(long x) {
 Then compiling that tiny file by simple invocation of your favourite compiler:
 
 ```
-gdc-14 -shared -fPIC -O2 -fpreview=all phpmod.d bitops.d -o bitops.so
+gdc-15 -shared -fPIC -O2 -fpreview=all phpmod.d bitops.d -o bitops.so
+```
+
+or
+
+```
+ldc2 -shared -O2 --preview=all phpmod.d bitops.d --of=bitops.so
 ```
 
 And finally loading it:

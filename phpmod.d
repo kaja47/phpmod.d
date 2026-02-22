@@ -20,7 +20,14 @@
  *
  * To target different PHP versions use `-fversion=PHP85` option.
  *
- * Never supported:
+ * Performance considerations: TODO
+ * - if your funcion is small, consider marking it pragma(inline, true)
+ * - nothrow function generate shorter and better code
+ * - everything except `get_module` can be marked as @hidden to avoid going
+ *   through PLTs and allow compiler to inline on its own (for D code
+ *   -fvisibility=hidden doesn't seems to do anything)
+ *
+ * Unlikely to be supported:
  *  - crummy typing rules and coercions following exact PHP semantic
  *    (strict_types is the only way)
  *  - PHP references.
@@ -65,8 +72,8 @@ static if (PHPVersion == 86) {
   enum ZendApi = 20250926;
   enum BuildId = "API20250926,NTS" ~ (PHPDebugBuild ? ",debug" : "");
 } else static if (PHPVersion == 85) {
-  enum ZendApi = 20240925;
-  enum BuildId = "API20240925,NTS" ~ (PHPDebugBuild ? ",debug" : "");
+  enum ZendApi = 20250925;
+  enum BuildId = "API20250925,NTS" ~ (PHPDebugBuild ? ",debug" : "");
 } else static if (PHPVersion == 84) {
   enum ZendApi = 20240924;
   enum BuildId = "API20240924,NTS" ~ (PHPDebugBuild ? ",debug" : "");
@@ -82,8 +89,8 @@ private enum ExceptionsAllowed = __traits(compiles, () { try {} catch (Exception
 
 
 static if (PHPVersion == 86) {
-  private enum _exceptionOffsetInExecGlobals = 960;
-  private enum _zendExecutorGlobalsSize = 2032;
+  private enum _exceptionOffsetInExecGlobals = 1008;
+  private enum _zendExecutorGlobalsSize = 2080;
 } else static if (PHPVersion == 85) {
   private enum _exceptionOffsetInExecGlobals = 960;
   private enum _zendExecutorGlobalsSize = 1984;
@@ -96,11 +103,30 @@ static if (PHPVersion == 86) {
 } else static assert(0);
 
 
+
+// Some functions allocating managed memory have different signatures in debug mode.
+version (ZEND_DEBUG) {
+  private void _allocDebugParametersPrototype(
+    const(char)* filename = __FILE__.ptr, uint lineno = __LINE__,
+    const(char)* orig_filename = null, uint orig_lineno = 0
+  );
+  static if (is(typeof(_allocDebugParametersPrototype) DebugAllocParams == __parameters)) {}
+} else {
+  alias DebugAllocParams = AliasSeq!();
+}
+
+
+
+alias zend_long  = long;
+alias zend_ulong = ulong;
+
+
 // Import (and document) useful set of symbols and global variables exposed
 // from PHP header files.
 // Block is __gshared to make all variable true globals and not thread locals.
 // Only ZTS build have some use for thread local variables (see ZEND_TLS in PHP source).
 extern extern(C) @nogc nothrow __gshared {
+
   // Absolutely massive struct which I will not reproduce here. The only thing
   // we need is the field pointing to the current exception (and size of the
   // struct, so compiler doesn't get any funny ideas) See currentException().
@@ -111,130 +137,262 @@ extern extern(C) @nogc nothrow __gshared {
 
   //void *tsrm_get_ls_cache();
 
-  version (ZEND_DEBUG) {
-    void* _emalloc(size_t size,
-        const(char)* filename = __FILE__.ptr, uint lineno = __LINE__,
-        const(char)* orig_filename = null, uint orig_lineno = 0
-    ) @trusted;
-    void _efree(void* ptr,
-        const(char)* filename = __FILE__.ptr, uint lineno = __LINE__,
-        const(char)* orig_filename = null, uint orig_lineno = 0
-    );
-  } else {
-    void* _emalloc(size_t size) @trusted;
-    // parameter ptr can be null
-    void _efree(void* ptr);
-  }
+  // === memory management ===
+
+  void* _emalloc(size_t size, DebugAllocParams _) @trusted;
+  void* _safe_emalloc(size_t nmemb, size_t size, size_t offset, DebugAllocParams _) @trusted;
+  void* _ecalloc(size_t nmemb, size_t size, DebugAllocParams _);
+  void* _erealloc(void* ptr, size_t size, DebugAllocParams _);
+  void* _erealloc2(void* ptr, size_t size, size_t copy_size, DebugAllocParams _);
+  void* _safe_erealloc(void* ptr, size_t nmemb, size_t size, size_t offset, DebugAllocParams _);
+  void* _safe_realloc(void* ptr, size_t nmemb, size_t size, size_t offset);
+
+  /// parameter ptr can be null
+  void _efree(void* ptr, DebugAllocParams _);
+
 
 
   // === parameter parsing ===
 
-  @attribute("cold") void zend_wrong_parameters_count_error(uint min_num_args, uint max_num_args);
-  @attribute("cold") void zend_argument_type_error(uint arg_num, const(char) *format, ...);
-  @attribute("cold") void zend_type_error(const(char) *format, ...);
-  @attribute("cold") zend_object* zend_throw_exception(zend_class_entry* exception_ce, scope const(char)* message, long code);
-  @attribute("cold") zend_object* zend_throw_exception_ex(zend_class_entry* exception_ce = null, long code, scope const(char)* format, ...);
-  @attribute("cold") void zend_clear_exception();
+  @cold void zend_wrong_parameters_count_error(uint min_num_args, uint max_num_args);
+  @cold void zend_argument_type_error(uint arg_num, const(char) *format, ...);
+  @cold void zend_type_error(const(char) *format, ...);
+  @cold zend_object* zend_throw_exception(zend_class_entry* exception_ce = null, scope const(char)* message, long code);
+  @cold zend_object* zend_throw_exception_ex(zend_class_entry* exception_ce = null, long code, scope const(char)* format, ...);
+  @cold void zend_clear_exception();
 
 
   // === zvals ===
 
-  /// decrement refcount (if applicable) and deallocate object/array/string on
-  /// RC == 0
-  void zval_ptr_dtor(scope zval *zval_ptr);
+  /// Decrements refcount (if applicable) and deallocates object/array/string
+  /// when RC reaches zero.
+  void zval_ptr_dtor(scope zval* zval_ptr);
 
-  /// converts zval to string
-  /// RC++
+  /// Same as zval_ptr_dtor but also sets zval_ptr to zval(null)
+  static if (PHPVersion >= 85)
+  void zval_ptr_safe_dtor(scope zval* zval_ptr);
+
+  void zval_add_ref(zval* p);
+
+  /// Converts zval to string.
+  /// If zval `op` refers to string, its refcount get incremented and string
+  /// retunred. Otherwise new string (with RC=1) is allocated.
   zend_string* zval_get_string_func(zval *op);
 
 
   // === arrays ===
 
-  // note: In PHP source zend_hash_* functions don't convert numeric string
-  // keys into integers. That's the responsibility of inline zend_symtable_*
-  // functions. They are declared as inline in header file and therefore not
-  // exposed as symbols.
+  // note: zend_hash_* functions do not convert numeric string keys into
+  // integers. That's the responsibility of zend_symtable_*, add_* and
+  // array_set_zval_key functions. zend_symtable_* functions are declared as
+  // inline in a header file, not exposed as symbol and as such are not listed
+  // here.
 
-  /// Allocate new uninitialized HashTable struct. Memory for key/value data has
-  /// to be allocated separately by `zend_hash_real_init` or similar.
+  // Functions inserting, updating and delting from a hashtable increment
+  // string key refcount (if new entry was created).
+  // Insertion doesn't increment key's RC, but removal and replacement does.
+  // (Hashtable does take ownership of values but not keys. ???)
+  // Find return zval pointer into hashtable, if we want to keep the value, we
+  // need to incement the refcount.
+  // TODO is this correct?
+
+  // symtable = hashtable containing integer and non-numeric string keys
+  // proptable = hashtable that contains only string keys
+
+  // function naming scheme (see Zend/zend_hash.h):
+  // HASH_UPDATE   - Create new entry, or update the existing one.
+  //                 *_update, add_assoc*, add_index*
+  // HASH_ADD      - Create new entry, or fail (return null) if it exists.
+  //                 *_add
+  // HASH_ADD_NEW  - Used when the key is known not to exist.
+  //                 *_add_new
+  // HASH_LOOKUP   - Look up an existing entry, or create one with a NULL value.
+  //                 *_lookup
+  // HASH_ADD_NEXT - Append to an array. (e.g. $array[] = 42;)
+  //                 add_next_*
+
+  const HashTable zend_empty_array;
+
+  /// Allocate new uninitialized HashTable struct. Memory for key/value array
+  /// can be allocated explicitly by `zend_hash_real_init` and similar functions
+  /// or automatically when we try to insert new keys to the HashTable.
   HashTable* _zend_new_array(uint nSize);
-  /// Allocate and zero memory for key/value data.
+  HashTable* _zend_new_array_0();
+
+  HashTable* zend_new_pair(scope const(zval)* val1, scope const(zval)* val2);
+
+  /// Allocates and zero memory for key/value array.
   void zend_hash_real_init(HashTable *ht, bool packed);
   /// ditto
   void zend_hash_real_init_packed(HashTable *ht);
   /// ditto
   void zend_hash_real_init_mixed(HashTable *ht);
 
-  /// Convert hash table representation between hash map and packed array.
-  /// Performs no safety checks whether the hashtable has given representation.
+  /// Converts hash table representation from packed array to hash table.
+  /// Performs no checks if the HashTable argument has correct representation.
+  /// Is safe only when RC = 1.
   void zend_hash_packed_to_hash(HashTable *ht);
-  /// ditto
+  /// Converts hash table representation from hash table to packed array.
+  /// Performs no checks if the HashTable argument has correct representation.
+  /// Is safe only when RC = 1.
   void zend_hash_to_packed(HashTable *ht);
   /// Creates new packed array with the values copied from the source array.
   /// Safe to use on both hash tables and packed arrays.
-  HashTable* zend_array_to_list(HashTable *source);
+  HashTable* zend_array_to_list(scope HashTable *source);
 
-  /// Grow hash table. Grow only, never shrink.
+  HashTable* zend_symtable_to_proptable(return scope HashTable* ht);
+  HashTable* zend_proptable_to_symtable(return scope HashTable* ht, bool always_duplicate);
+
+  /// Grows a hash table. Only grows, never shrinks.
+  /// Parameter `packed` must match `ht`.
   void zend_hash_extend(HashTable *ht, uint nSize, bool packed);
 
-  /// Destroy contents of the array `ht`, deallocate memory for key/values and
-  /// HashTable struct.
+  /// Destroy contents of the array `ht`, deallocate memory for key/values
+  /// array and HashTable struct. Can be safely called only when RC <= 1.
   void zend_array_destroy(HashTable *ht);
+  /// Internal implementation used from `zend_array_destroy`. Does not deallocate
+  /// `ht` itself (only data array) and does not remove reference to `ht` from
+  /// the GC root buffer. Can be safely called only when RC <= 1.
+  void zend_hash_destroy(HashTable* ht);
+  /// Destroys key/value data (ie. decrements their refcounts).
+  /// Does not deallocate data array and HashTable struct.
+  void zend_hash_clean(HashTable* ht);
+
+  /// Creates a new array which is a true duplicate (RC=1) of `source` array.
   HashTable* zend_array_dup(scope HashTable* source);
+
+  /// Rebuild hastable in place. Buckets get compacted into one seqence without
+  /// gaps left by deleted items. Does not change amount of allocated memory.
+  /// Cannot be called on packed arrays.
   void zend_hash_rehash(HashTable *ht);
 
   // Return pointer into table or null if not present.
-  zval* zend_hash_find(return scope const(HashTable)* ht, scope zend_string* key);
-  zval* zend_hash_find_known_hash(return scope const(HashTable)* ht, scope const(zend_string)* key);
-  zval* zend_hash_str_find(return scope const(HashTable)* ht, scope const(char)* key, size_t len);
-  zval* zend_hash_index_find(return scope const(HashTable)* ht, ulong h);
+  inout(zval)* zend_hash_find(scope inout(HashTable)* ht, scope zend_string* key);
+  inout(zval)* zend_hash_find_known_hash(scope inout(HashTable)* ht, scope const(zend_string)* key);
+  inout(zval)* zend_hash_str_find(scope inout(HashTable)* ht, scope const(char)* key, size_t len);
+  inout(zval)* zend_hash_index_find(scope inout(HashTable)* ht, ulong h);
   // (only for non-packed hash maps);
-  zval* _zend_hash_index_find(return scope const(HashTable)* ht, ulong h);
+  zval* _zend_hash_index_find(scope const(HashTable)* ht, ulong h);
 
-  /// Create new entry, or fail if it exists.
-  /// Returns pointer into table where inserted zval resides. (TODO is this correct?)
-  zval* zend_hash_add(HashTable *ht, zend_string *key, zval *pData);
-  zval* zend_hash_str_add(HashTable *ht, const(char) *str, size_t len, zval *pData);
-  zval* zend_hash_index_add(HashTable *ht, ulong h, zval *pData);
+  /// Create new entry, or fail (return null) if it exists.
+  /// Returns pointer into table where inserted zval resides.
+  zval* zend_hash_add(scope HashTable *ht, zend_string *key, zval *pData);
+  zval* zend_hash_str_add(scope HashTable *ht, scope const(char) *str, size_t len, zval *pData);
+  zval* zend_hash_index_add(scope HashTable *ht, ulong h, scope zval *pData);
 
-  // Create new entry. We know it doesn't exist.
-  zval* zend_hash_add_new(HashTable *ht, zend_string *key, zval *pData);
-  zval* zend_hash_str_add_new(HashTable *ht, const(char) *str, size_t len, zval *pData);
-  zval* zend_hash_index_add_new(HashTable *ht, ulong h, zval *pData);
+  // Create new entry. We know the key doesn't exist in the hashmap.
+  zval* zend_hash_add_new(scope HashTable *ht, zend_string *key, zval *pData);
+  zval* zend_hash_str_add_new(scope HashTable *ht, scope const(char) *str, size_t len, zval *pData);
+  zval* zend_hash_index_add_new(scope HashTable *ht, ulong h, scope zval *pData);
+
+  // Create new entry with value set to zval(null).
+  zval* zend_hash_index_add_empty_element(scope HashTable* ht, zend_ulong h);
+  zval* zend_hash_add_empty_element(scope HashTable* ht, zend_string* key);
+  zval* zend_hash_str_add_empty_element(scope HashTable* ht, scope const(char)* key, size_t len);
 
   /// Create new entry, or update the existing one.
-  zval* zend_hash_update(HashTable *ht, zend_string *key, zval *pData);
-  zval* zend_hash_str_update(HashTable *ht, const(char) *str, size_t len, zval *pData);
-  zval* zend_hash_index_update(HashTable *ht, ulong h, zval *pData);
+  zval* zend_hash_update(scope HashTable *ht, zend_string *key, scope zval *pData);
+  zval* zend_hash_str_update(scope HashTable *ht, scope const(char) *str, size_t len, scope zval *pData);
+  zval* zend_hash_index_update(scope HashTable *ht, ulong h, scope zval *pData);
 
   /// Look up an existing entry, or create one with a NULL value.
-  zval* zend_hash_lookup(HashTable *ht, zend_string *key);
-  zval* zend_hash_index_lookup(HashTable *ht, ulong h);
+  zval* zend_hash_lookup(scope HashTable *ht, zend_string *key);
+  static if (PHPVersion >= 86)
+  zval* zend_hash_str_lookup(scope HashTable* ht, scope const(char)* str, size_t len);
+  zval* zend_hash_index_lookup(scope HashTable *ht, ulong h);
 
   /// Append to an array (doesn't try to increment pData refcount)
-  zval* zend_hash_next_index_insert(HashTable *ht, zval *pData);
+  zval* zend_hash_next_index_insert(scope HashTable *ht, scope zval *pData);
   /// Append to an array + we know this new offset doesn't exist. ???
-  zval* zend_hash_next_index_insert_new(HashTable *ht, zval *pData);
+  zval* zend_hash_next_index_insert_new(scope HashTable *ht, scope zval *pData);
 
   // delete
-  zend_result zend_hash_del(HashTable *ht, zend_string *key);
-  zend_result zend_hash_str_del(HashTable *ht, const(char) *str, size_t len);
-  zend_result zend_hash_index_del(HashTable *ht, ulong h);
+  zend_result zend_hash_del(scope HashTable *ht, scope zend_string *key);
+  zend_result zend_hash_str_del(scope HashTable *ht, const(char) *str, size_t len);
+  zend_result zend_hash_index_del(scope HashTable *ht, ulong h);
+
+  // API that handles numeric string keys as integers
+
+  /// If `key` is a numeric string key, return true and set `idx` to its value.
+  bool _zend_handle_numeric_str_ex(scope const(char)* key, size_t length, scope zend_ulong* idx);
+
+  /// Returns failure when the key is a not scalar or a resource (what other situations? TODO).
+  zend_result array_set_zval_key(scope HashTable* ht, scope zval* key, scope zval* value);
+
+  // in all of the follwing functions `arr` argument must refer to HashTable
+
+  void add_assoc_long_ex     (scope zval* arr, scope const(char)* key, size_t key_len, zend_long n);
+  void add_assoc_null_ex     (scope zval* arr, scope const(char)* key, size_t key_len);
+  void add_assoc_bool_ex     (scope zval* arr, scope const(char)* key, size_t key_len, bool b);
+  void add_assoc_resource_ex (scope zval* arr, scope const(char)* key, size_t key_len, zend_resource* r);
+  void add_assoc_double_ex   (scope zval* arr, scope const(char)* key, size_t key_len, double d);
+  void add_assoc_str_ex      (scope zval* arr, scope const(char)* key, size_t key_len, zend_string* str);
+  void add_assoc_string_ex   (scope zval* arr, scope const(char)* key, size_t key_len, scope const(char)* str);
+  void add_assoc_stringl_ex  (scope zval* arr, scope const(char)* key, size_t key_len, scope const(char)* str, size_t length);
+  void add_assoc_array_ex    (scope zval* arr, scope const(char)* key, size_t key_len, zend_array* arr);
+  void add_assoc_object_ex   (scope zval* arr, scope const(char)* key, size_t key_len, zend_object* obj);
+  void add_assoc_reference_ex(scope zval* arr, scope const(char)* key, size_t key_len, zend_reference* ref_);
+  void add_assoc_zval_ex     (scope zval* arr, scope const(char)* key, size_t key_len, scope zval* value);
+
+  void add_index_long     (scope zval* arr, zend_ulong index, zend_long n);
+  void add_index_null     (scope zval* arr, zend_ulong index);
+  void add_index_bool     (scope zval* arr, zend_ulong index, bool b);
+  void add_index_resource (scope zval* arr, zend_ulong index, zend_resource* r);
+  void add_index_double   (scope zval* arr, zend_ulong index, double d);
+  void add_index_str      (scope zval* arr, zend_ulong index, zend_string* str);
+  void add_index_string   (scope zval* arr, zend_ulong index, scope const(char)* str);
+  void add_index_stringl  (scope zval* arr, zend_ulong index, scope const(char)* str, size_t length);
+  void add_index_array    (scope zval* arr, zend_ulong index, zend_array* arr);
+  void add_index_object   (scope zval* arr, zend_ulong index, zend_object* obj);
+  void add_index_reference(scope zval* arr, zend_ulong index, zend_reference* ref_);
+  alias add_index_zval =  (scope zval* arr, zend_ulong index, scope zval* value) =>
+    zend_hash_index_update(arr.asArray, index, value) ? Result.SUCCESS : Result.FAILURE;
+
+  // TODO: when it can return failure?
+  zend_result add_next_index_long     (scope zval* arr, zend_long n);
+  zend_result add_next_index_null     (scope zval* arr);
+  zend_result add_next_index_bool     (scope zval* arr, bool b);
+  zend_result add_next_index_resource (scope zval* arr, zend_resource* r);
+  zend_result add_next_index_double   (scope zval* arr, double d);
+  zend_result add_next_index_str      (scope zval* arr, zend_string* str);
+  zend_result add_next_index_string   (scope zval* arr, scope const(char)* str);
+  zend_result add_next_index_stringl  (scope zval* arr, scope const(char)* str, size_t length);
+  zend_result add_next_index_array    (scope zval* arr, zend_array* arr);
+  zend_result add_next_index_object   (scope zval* arr, zend_object* obj);
+  zend_result add_next_index_reference(scope zval* arr, zend_reference* ref_);
+
+  pragma(inline, true)
+  zval* zend_symtable_find(scope HashTable* ht, scope zend_string* key) {
+    zend_ulong idx;
+    if (_zend_handle_numeric_str_ex(key.ptr, key.length, &idx)) {
+      return zend_hash_index_find(ht, idx);
+    } else {
+      return zend_hash_find(ht, key);
+    }
+  }
+
 
 
   // === strings ===
+
+  extern zend_string* zend_empty_string;
+  extern zend_string*[256] zend_one_char_string;
+  extern zend_string** zend_known_strings;
 
   // recalculate and update hash value of given string
   ulong zend_string_hash_func(zend_string *str);
   // compute hash value of given string
   ulong zend_hash_func(scope const(char)* str, size_t len);
 
-  alias zend_string_init_interned_func_t = zend_string * function(const(char) *str, size_t size, bool permanent);
-  zend_string_init_interned_func_t zend_string_init_interned;
+  alias zend_string_init_interned_func_t = zend_string* function(const(char)* str, size_t size, bool permanent);
+  const zend_string_init_interned_func_t zend_string_init_interned;
+
+  zend_string* zend_string_concat2(const(char)* str1, size_t str1_len, const(char)* str2, size_t str2_len);
+  zend_string* zend_string_concat3(const(char)* str1, size_t str1_len, const(char)* str2, size_t str2_len, const(char)* str3, size_t str3_len);
 
   // max_len = 0 means no limit
-  zend_string* zend_vstrpprintf(size_t max_len, const(char)* format, va_list ap);
-  zend_string* zend_strpprintf(size_t max_len, const(char)* format, ...);
+  zend_string* zend_vstrpprintf(size_t max_len = 0, const(char)* format, va_list ap);
+  zend_string* zend_strpprintf(size_t max_len = 0, const(char)* format, ...);
 
 
   // === resources ===
@@ -276,12 +434,14 @@ extern extern(C) @nogc nothrow __gshared {
   void zend_object_std_init(zend_object *object, zend_class_entry *ce);
   /// Destroy and deallocate object.
   void zend_object_std_dtor(zend_object *object);
+  /// Calls __destruct.
+  void zend_objects_destroy_object(zend_object* object);
 
   alias CacheSlot = void*[3];
-  zval *zend_read_property(zend_class_entry *scope_, zend_object *object, const(char)* name, size_t name_length, bool silent, zval *rv);
-  zval *zend_read_property_ex(zend_class_entry *scope_, zend_object *object, zend_string *name, bool silent, zval *rv);
-  void zend_update_property(zend_class_entry *scope_, zend_object *object, const(char)* name, size_t name_length, zval *value);
-  void zend_unset_property(zend_class_entry *scope_, zend_object *object, const(char)* name, size_t name_length);
+  zval *zend_read_property(zend_class_entry *scope_, scope zend_object *object, scope const(char)* name, size_t name_length, bool silent, scope zval *rv);
+  zval *zend_read_property_ex(zend_class_entry *scope_, scope zend_object *object, zend_string *name, bool silent, scope zval *rv);
+  void zend_update_property(zend_class_entry *scope_, scope zend_object *object, scope const(char)* name, size_t name_length, scope zval *value);
+  void zend_unset_property(zend_class_entry *scope_, scope zend_object *object, scope const(char)* name, size_t name_length);
 
   zval *zend_read_property_ex(zend_class_entry *scope_, zend_object *object, zend_string *name, bool silent, zval *rv);
 
@@ -296,8 +456,14 @@ extern extern(C) @nogc nothrow __gshared {
 
   const(zend_object_handlers) std_object_handlers;
 
+
+  zend_class_entry* zend_register_internal_class(scope const(zend_class_entry)* class_entry);
+  zend_class_entry *zend_register_internal_class_ex(scope const(zend_class_entry)* class_entry, zend_class_entry *parent_ce);
   static if (PHPVersion >= 84)
-  zend_class_entry *zend_register_internal_class_with_flags(zend_class_entry *class_entry, zend_class_entry *parent_ce, uint ce_flags);
+  zend_class_entry *zend_register_internal_class_with_flags(scope const(zend_class_entry)* class_entry, zend_class_entry* parent_ce, uint ce_flags);
+  zend_class_entry* zend_register_internal_interface(const(zend_class_entry)* orig_class_entry);
+
+
   void zend_class_implements(zend_class_entry *class_entry, int num_interfaces, ...);
   bool zend_class_implements_interface(const(zend_class_entry)* class_ce, const(zend_class_entry)* interface_ce);
 
@@ -316,22 +482,27 @@ extern extern(C) @nogc nothrow __gshared {
   // === constants ===
 
   zval* zend_get_constant(zend_string* name);
+  static if (PHPVersion >= 84)
+  zend_constant* zend_get_constant_ptr(zend_string* name);
   zval* zend_get_constant_str(const(char)* name, size_t name_len);
   zval* zend_get_constant_ex(zend_string* name, zend_class_entry* scope_, uint flags);
   zval* zend_get_class_constant_ex(zend_string* class_name, zend_string* constant_name, zend_class_entry* scope_, uint flags);
 
   static if (PHPVersion < 85) {
-    private alias RegConstRT = void;
+    private alias RegConstTypeRT = void;
+    private alias RegConstRT     = zend_result;
   } else {
-    private alias RegConstRT = zend_constant*;
+    private alias RegConstTypeRT = zend_constant*;
+    private alias RegConstRT     = zend_constant*;
   }
 
-  RegConstRT zend_register_bool_constant(const(char)* name, size_t name_len, bool bval, int flags, int module_number);
-  RegConstRT zend_register_null_constant(const(char)* name, size_t name_len, int flags, int module_number);
-  RegConstRT zend_register_long_constant(const(char)* name, size_t name_len, long lval, int flags, int module_number);
-  RegConstRT zend_register_double_constant(const(char)* name, size_t name_len, double dval, int flags, int module_number);
-  RegConstRT zend_register_string_constant(const(char)* name, size_t name_len, const(char)* strval, int flags, int module_number);
-  RegConstRT zend_register_stringl_constant(const(char)* name, size_t name_len, const(char)* strval, size_t strlen, int flags, int module_number);
+  RegConstTypeRT zend_register_bool_constant(const(char)* name, size_t name_len, bool bval, int flags, int module_number);
+  RegConstTypeRT zend_register_null_constant(const(char)* name, size_t name_len, int flags, int module_number);
+  RegConstTypeRT zend_register_long_constant(const(char)* name, size_t name_len, long lval, int flags, int module_number);
+  RegConstTypeRT zend_register_double_constant(const(char)* name, size_t name_len, double dval, int flags, int module_number);
+  RegConstTypeRT zend_register_string_constant(const(char)* name, size_t name_len, const(char)* strval, int flags, int module_number);
+  RegConstTypeRT zend_register_stringl_constant(const(char)* name, size_t name_len, const(char)* strval, size_t strlen, int flags, int module_number);
+  RegConstRT     zend_register_constant(zend_constant* c);
 
   struct zend_constant {
     zval value;
@@ -341,63 +512,68 @@ extern extern(C) @nogc nothrow __gshared {
       HashTable* attributes;
     }
   }
-}
 
-alias zend_long  = long;
-alias zend_ulong = ulong;
+
+  // === others ===
+
+  struct zend_ini_entry;
+  struct zend_module_dep;
+  struct zend_op;
+}
 
 alias rsrc_dtor_func_t = void function(zend_resource*);
 
 
 
 
+
+
 version (GNU) {
-  import gcc.attributes : attribute;
-  import gcc.builtins;
-  pragma(inline, true) bool   likely()(bool e) { return !!__builtin_expect(e, 1); };
-  pragma(inline, true) bool unlikely()(bool e) { return !!__builtin_expect(e, 0); };
+  public import gcc.attributes : hidden, cold;
+  import gcc.builtins : __builtin_expect;
+  pragma(inline, true) bool   likely()(bool e) => !!__builtin_expect(e, 1);
+  pragma(inline, true) bool unlikely()(bool e) => !!__builtin_expect(e, 0);
+} else version (LDC) {
+  public import ldc.attributes : hidden, cold;
+  import ldc.intrinsics : llvm_expect;
+  pragma(inline, true) bool   likely()(bool e) => !!llvm_expect(e, 1);
+  pragma(inline, true) bool unlikely()(bool e) => !!llvm_expect(e, 0);
 } else {
-  struct attribute { string dummy1; string dummy2; }
-  pragma(inline, true) bool   likely()(bool e) { return e; };
-  pragma(inline, true) bool unlikely()(bool e) { return e; };
+  enum hidden;
+  enum cold;
+  pragma(inline, true) bool   likely()(bool e) => e;
+  pragma(inline, true) bool unlikely()(bool e) => e;
 }
-enum hidden = attribute("visibility", "hidden");
+
+
 
 // This mixin is used to supress generating large toHash() functions for
 // structs that souldn't really be used in hash maps.
 private mixin template NoToHashFunction() {
-  size_t toHash() const nothrow { assert(0); }
+  version (D_BetterC) {
+    // Do nothing when -fno-druntime is enabled.
+    // BetterC doesn't support associative arrays and as a result doesn't
+    // generate toHash() method.
+  } else {
+    size_t toHash() const nothrow { assert(0); }
+  }
 }
 
-
-
-// === debug mode support ===
-// Some functions have different signatures in debug mode.
-
-version (ZEND_DEBUG) {
-  private void _allocDebugParametersPrototype(
-    const(char)* filename = __FILE__.ptr, uint lineno = __LINE__,
-    const(char)* orig_filename = null, uint orig_lineno = 0
-  );
-  static if (is(typeof(_allocDebugParametersPrototype) DebugParams == __parameters)) {}
-} else {
-  alias DebugParams = AliasSeq!();
-}
 
 
 
 // === memory allocation and deallocation ===
 
 pragma(inline, true)
-T* emalloc(T)(DebugParams _) @nogc nothrow @trusted =>
+T* emalloc(T)(DebugAllocParams _) @nogc nothrow @trusted =>
   cast(T*) _emalloc(T.sizeof, _);
 
 pragma(inline, true)
-T[] emallocArray(T)(size_t n, DebugParams _) @nogc nothrow @trusted =>
-  (cast(T*) _emalloc(T.sizeof * n, _))[0 .. n];
+T[] emallocArray(T)(size_t n, DebugAllocParams _) @nogc nothrow @trusted =>
+  (cast(T*) _safe_emalloc(n, T.sizeof, 0, _))[0 .. n];
 
-void* pemalloc(size_t n, bool persistent) @nogc nothrow @trusted =>
-  !persistent ? _emalloc(n) : malloc(n);
+void* pemalloc(size_t n, bool persistent, DebugAllocParams _) @nogc nothrow @trusted =>
+  !persistent ? _emalloc(n, _) : malloc(n);
 
 void pefree(void* ptr, bool persistent) @nogc nothrow =>
   !persistent ? _efree(ptr) : free(ptr);
@@ -465,7 +641,8 @@ template func(alias f, alias phpName = "") {
   } else {
     enum _phpName = phpName;
   }
-  alias func = makeFunctionEntry!(f, _phpName, true, FunctionKind.Function);
+  enum nsName = nameWithNamespace!(f, _phpName);
+  alias func = makeFunctionEntry!(f, nsName, true, FunctionKind.Function);
 }
 
 
@@ -761,6 +938,8 @@ private void wrapFunc
   enum lastArg = ParamTypes.length - 1 - firstArgIsThis;
 
 
+  bool defaultSet;
+
   static foreach (i, PT; ParamTypes[firstArgIsThis .. $]) {
     static if (frameless) {
       arg = zvalArgs!i;
@@ -768,13 +947,21 @@ private void wrapFunc
       arg = zvalArgs + i;
     }
 
+
+    defaultSet = false;
     static if (!frameless && i >= reqNumParams) {{
       zval _z;
       if (i >= numArgs) {
         static if (i == lastArg && IsVariadic!f) {
           // no need to do anything
         } else {
-          _z = zval(DefaultArg!(f, i + firstArgIsThis));
+          auto def = DefaultArg!(f, i + firstArgIsThis);
+          static if (is(typeof(def) == const(char)[])) {
+            args[i] = def;
+            defaultSet = true;
+          } else {
+            _z = zval(def);
+          }
           arg = &_z;
         }
       }
@@ -791,12 +978,14 @@ private void wrapFunc
       // passing as template parameter
       enum nullable = isNullable!(__traits(getAttributes, ParamTypes[i + firstArgIsThis .. i + 1 + firstArgIsThis]));
 
-      auto typed = parseZval!(PT, nullable)(arg);
-      if (typed.valid) {
-        args[i] = typed.val;
-      } else {
-        zend_argument_type_error(i+1, typed.error.ptr, typed.errorArg);
-        return;
+      if (!defaultSet) {
+        auto typed = parseZval!(PT, nullable)(arg);
+        if (typed.valid) {
+          args[i] = typed.val;
+        } else {
+          zend_argument_type_error(i+1, typed.error.ptr, typed.errorArg);
+          return;
+        }
       }
 
     }} else static if (i == lastArg && IsVariadic!f) {
@@ -938,7 +1127,7 @@ private template HasCStringArguments(alias f) {
 private template ConvertCStrArgs(alias f) {
   static if (is(typeof(f) ParamTypes == __parameters)) {}
 
-  alias Signature = AliasSeq!("pragma(inline, true) void wrapper(");
+  alias Signature = AliasSeq!("pragma(inline, true) @system void wrapper(");
   alias Body      = AliasSeq!("{ return f(");
 
   static foreach (i, PT; ParamTypes) {
@@ -1095,8 +1284,8 @@ struct zval {
     zend_array       *arr;
     zend_object      *obj;
     zend_resource    *res;
+    zend_reference   *ref_;
     /*
-    zend_reference   *ref;
     zend_ast_ref     *ast;
     zval             *zv;
     */
@@ -1204,18 +1393,18 @@ struct zval {
 
   Type type() nothrow const pure @safe { return u1.v.type; }
 
-  long* asLong() return       nothrow { return type == Type.Long ? &lval : null; }
-  double* asDouble() return   nothrow { return type == Type.Double ? &dval : null; }
+  long* asLong() return       nothrow => type == Type.Long ? &lval : null;
+  double* asDouble() return   nothrow => type == Type.Double ? &dval : null;
   const(bool)* asBool()       nothrow {
     immutable static bool[2] falseTrue = [false, true];
     if (type == Type.False) return &falseTrue[0];
     if (type == Type.True)  return &falseTrue[1];
     return null;
   }
-  HashTable* asArray()        nothrow { return type == Type.Array ? arr : null; }
-  zend_object* asObject()     nothrow { return type == Type.Object ? obj : null; }
-  zend_string* asString()     nothrow { return type == Type.String ? str : null; }
-  zend_resource* asResource() nothrow { return type == Type.Resource ? res : null; }
+  HashTable* asArray()        nothrow => type == Type.Array ? arr : null;
+  zend_object* asObject()     nothrow => type == Type.Object ? obj : null;
+  zend_string* asString()     nothrow => type == Type.String ? str : null;
+  zend_resource* asResource() nothrow => type == Type.Resource ? res : null;
 
   static if (ExceptionsAllowed) {
     long toLong() return        { if (type != Type.Long)     throw new Exception("type error: cannot convert zval to long"); return lval; }
@@ -1227,9 +1416,9 @@ struct zval {
     zend_resource* toResource() { if (type != Type.Resource) throw new Exception("type error: cannot convert zval to resource"); return res; }
   }
 
-  bool isTrue()  { return type == Type.True; }
-  bool isFalse() { return type == Type.False; }
-
+  bool isNull()  => type == Type.Null;
+  bool isTrue()  => type == Type.True;
+  bool isFalse() => type == Type.False;
 
   pure:
   // see Z_TYPE_INFO_REFCOUNTED
@@ -1293,13 +1482,16 @@ struct TypedZval(Types...) {
   }
   // opAssign is explicit to be marked inline
   void opAssign(TypedZval!Types arg) nothrow pure {
-    // If we copy everything, even zvals' context dependent field, gdc is is
+    // If we copy everything, even zvals' context dependent field, gdc is
     // able to produce much better assembly for function parseZval. That shoud
     // be sort of OK. TypedZval is intended only for arguments and return
     // types. In those situations context dependent field has no meaning.
     memcpy(&this, &arg, zval.sizeof);
     //this.z = arg.z; // polite and weirdly slow way of doing things
   }
+
+  long* asLong() return     nothrow => z.type == Type.Long ? &z.lval : null;
+  double* asDouble() return nothrow => z.type == Type.Double ? &z.dval : null;
 }
 
 
@@ -1311,6 +1503,7 @@ struct TypedZval(Types...) {
 /// It behaves the same as `scope(exit) release(z);`
 struct autozval {
   pragma(inline, true):
+  nothrow @nogc:
   zval z;
   alias this = z;
   this(zval _z) { z = _z; }
@@ -1393,25 +1586,25 @@ struct zend_refcounted_h {
   private enum isRcType(T) = is(T : zend_string) || is(T : zend_object) || is(T : HashTable) || is(T : zend_resource);
 
   /// Modify refcount without checking if it's allowed. Can be called only on non-immutable objects/arrays/string.
-  auto addRef(T)(ref T x)    if (isRcType!T) { return x.gc.addRef(); }
-  auto addRef(T)(T* x)       if (isRcType!T) { return x.gc.addRef(); }
-  auto delRef(T)(ref T x)    if (isRcType!T) { return x.gc.delRef(); }
-  auto delRef(T)(T* x)       if (isRcType!T) { return x.gc.delRef(); }
+  auto addRef(T)(ref T x)    if (isRcType!T) => x.gc.addRef();
+  auto addRef(T)(T* x)       if (isRcType!T) => x.gc.addRef();
+  auto delRef(T)(ref T x)    if (isRcType!T) => x.gc.delRef();
+  auto delRef(T)(T* x)       if (isRcType!T) => x.gc.delRef();
   /// Modify refcount only when allowed. Safe but little bit slower.
-  void tryAddRef(T)(ref T x) if (isRcType!T) { return x.gc.tryAddRef(); }
-  void tryAddRef(T)(T* x)    if (isRcType!T) { return x.gc.tryAddRef(); }
-  void tryDelRef(T)(ref T x) if (isRcType!T) { return x.gc.tryDelRef(); }
-  void tryDelRef(T)(T* x)    if (isRcType!T) { return x.gc.tryDelRef(); }
+  void tryAddRef(T)(ref T x) if (isRcType!T) { x.gc.tryAddRef(); }
+  void tryAddRef(T)(T* x)    if (isRcType!T) { x.gc.tryAddRef(); }
+  void tryDelRef(T)(ref T x) if (isRcType!T) { x.gc.tryDelRef(); }
+  void tryDelRef(T)(T* x)    if (isRcType!T) { x.gc.tryDelRef(); }
 
   /// Safely increment refcount and return zval itself.
-  zval* bump(zval* x)    { x.tryAddRef(); return x; }
+  zval* bump(return scope zval* x)    { x.tryAddRef(); return x; }
   /// Safely decrement refcount and destroy object when refcount reaches zero
-  void release(zval* x)    { zval_ptr_dtor(x); }
+  void release(scope zval* x)    { zval_ptr_dtor(x); }
   void release(ref zval x) { zval_ptr_dtor(&x); }
 
   /// Safely increment refcount and return the object itself.
-  ref T bump(T)(ref T x) { x.tryAddRef(); return x;}
-  T* bump(T)(T* x)       { x.tryAddRef(); return x;}
+  ref T bump(T)(return ref T x) { x.tryAddRef(); return x;}
+  T* bump(T)(return scope T* x) { x.tryAddRef(); return x;}
 
   /// Safely decrement refcount and destroy object when refcount reaches zero
   // see zend_string_release
@@ -1434,8 +1627,16 @@ struct zend_refcounted_h {
 
   // see zend_object_release
   void release(zend_object* obj) {
+    zval z = zval(obj);
+    release(&z);
     // TODO
-    assert(0);
+    /*
+    if (delRef(obj) == 0) {
+      zend_objects_store_del(obj);
+    } else if (unlikely(GC_MAY_LEAK((zend_refcounted*)obj))) {
+      gc_possible_root(cast(zend_refcounted*)obj);
+    }
+    */
   }
 }
 
@@ -1450,6 +1651,23 @@ enum isRefcountedType(T) =
   is(T : const(zval)*) ||
   (is(T : const(Try!U), U) && isRefcountedType!U);
   // TODO iterator? (it contains zend_object_iterator which is a class object)
+
+
+
+// === reference ===
+
+struct zend_reference {
+	zend_refcounted_h              gc;
+	zval                           val;
+	zend_property_info_source_list sources;
+}
+
+union zend_property_info_source_list {
+	zend_property_info *ptr;
+	uintptr_t list;
+}
+
+struct zend_property_info;
 
 
 
@@ -1482,8 +1700,8 @@ struct zend_string {
   alias ZEND_MM_ALIGNED_SIZE = (size) => (size + ZEND_MM_ALIGNMENT - 1) & ZEND_MM_ALIGNMENT_MASK;
 
   // see zend_string_alloc
-  static zend_string* alloc(size_t len, bool persistent = false) @trusted {
-    zend_string *ret = cast(zend_string*) pemalloc(ZEND_MM_ALIGNED_SIZE(zend_string.sizeof + len + 1), persistent);
+  static zend_string* alloc(size_t len, bool persistent = false, DebugAllocParams _) @trusted {
+    zend_string *ret = cast(zend_string*) pemalloc(ZEND_MM_ALIGNED_SIZE(zend_string.sizeof + len + 1), persistent, _);
 
     ret.gc.refcount = 1;
     ret.gc.u.type_info = GC_STRING | ((persistent ? IS_STR_PERSISTENT : 0) << GC_FLAGS_SHIFT);
@@ -1495,8 +1713,8 @@ struct zend_string {
 
   // see zend_string_init
   pragma(inline)
-  static zend_string* copy(scope const(char)[] str, bool persistent = false) {
-    auto s = zend_string.alloc(str.length, persistent);
+  static zend_string* copy(scope const(char)[] str, bool persistent = false, DebugAllocParams _) {
+    auto s = zend_string.alloc(str.length, persistent, _);
     s.str[] = str[];
     return s;
   }
@@ -1513,20 +1731,18 @@ struct zend_string {
     return &this == str || (len == str.len && !memcmp(this.val, str.val, len));
   }
 
-  // see SEPARATE_STRING
-  // TODO zend_string_separate differs
+  // see SEPARATE_STRING, zend_string_separate
   pragma(inline)
   zend_string* separate() return {
-    if (gc.refcount > 1) {
+    if (isInterned || gc.refcount > 1) {
       auto str = zend_string.copy(this.str);
-      this.delRef();
+      this.tryDelRef();
       return str;
     } else {
       return &this;
     }
   }
 
-  // TODO will PHP try to free immutable string and crash?
   static immutable(zend_string)* staticString(alias string str)() {
     enum size = ZEND_MM_ALIGNED_SIZE(zend_string.sizeof + str.length + 1);
     immutable static mem = makeStaticString!size(str);
@@ -1557,7 +1773,7 @@ struct zend_string {
     return fs;
   }
 
-  size_t toHash() const nothrow {
+  size_t toHash() const {
     return h ? h : zend_hash_func(ptr, len);
   }
 }
@@ -1581,7 +1797,9 @@ alias ZendArray  = HashTable;
 // Struct for array key (string or int)
 // It mimics zval struct and can be implicitly converted to one.
 struct Key {
-  nothrow @nogc pragma(inline, true):
+  pragma(inline, true):
+  nothrow @nogc:
+
   zend_string* str;
   long lval;
 
@@ -1610,6 +1828,7 @@ struct Key {
 // packed arrays may contain holes
 struct HashTable {
   pragma(inline, true):
+  @nogc:
 
   zend_refcounted_h gc;
   union u_ {
@@ -1636,12 +1855,12 @@ struct HashTable {
   long        nNextFreeElement;
   void*       pDestructor;
 
-  size_t length()      const @nogc nothrow pure { return nNumOfElements; }
-  bool isPacked()      const @nogc nothrow pure { return (u.flags & (1<<2)) != 0; }
-  bool isUnitialized() const @nogc nothrow pure { return (u.flags & (1<<3)) != 0; }
-  bool hasStaticKeys() const @nogc nothrow pure { return (u.flags & (1<<4)) != 0; }
-  bool hasEmptyInd()   const @nogc nothrow pure { return (u.flags & (1<<5)) != 0; }
-  bool hasHoles()      const @nogc nothrow pure { return nNumUsed != nNumOfElements; }
+  size_t length()      const nothrow pure { return nNumOfElements; }
+  bool isPacked()      const nothrow pure { return (u.flags & HASH_FLAG_PACKED) != 0; }
+  bool isUnitialized() const nothrow pure { return (u.flags & HASH_FLAG_UNINITIALIZED) != 0; }
+  bool hasStaticKeys() const nothrow pure { return (u.flags & HASH_FLAG_STATIC_KEYS) != 0; }
+  bool hasEmptyInd()   const nothrow pure { return (u.flags & HASH_FLAG_HAS_EMPTY_IND) != 0; }
+  bool hasHoles()      const nothrow pure { return nNumUsed != nNumOfElements; }
 
   static HashTable* alloc(size_t capacity = 1, bool packed = false) @nogc nothrow {
     auto ht = _zend_new_array(cast(uint) capacity);
@@ -1655,7 +1874,7 @@ struct HashTable {
 
 
   // see SEPARATE_ARRAY
-  HashTable* separate() return {
+  HashTable* separate() nothrow return {
     if (unlikely(gc.refcount > 1)) {
       auto arr = zend_array_dup(&this);
       this.tryDelRef();
@@ -1674,6 +1893,14 @@ struct HashTable {
   static HashTable* of(zval[] values...) {
     auto ht = HashTable.alloc(values.length, packed: true);
     ht.fillPacked(values);
+    return ht;
+  }
+
+  static HashTable* of(Args...)(Args values) {
+    auto ht = HashTable.alloc(values.length, packed: true);
+    static foreach (v; values) {
+      ht.append(zval(v));
+    }
     return ht;
   }
 
@@ -1700,21 +1927,22 @@ struct HashTable {
   }
 
 
-  @nogc nothrow {
-    inout(zval)* get(long key)                inout => cast(inout(zval)*) zend_hash_index_find(&this, key);
-    inout(zval)* get(scope const(char)[] key) inout => cast(inout(zval)*) zend_hash_str_find(&this, key.ptr, key.length);
-    inout(zval)* get(zend_string* key)        inout => cast(inout(zval)*) zend_hash_find(&this, key);
-    inout(zval)* get(Key key)                 inout => cast(inout(zval)*) key.str ? get(key.str) : get(key.lval);
+  nothrow {
+    inout(zval)* get(Key key)                 inout => key.str ? get(key.str) : get(key.lval);
+    inout(zval)* get(long key)                inout => zend_hash_index_find(&this, key);
+    inout(zval)* get(zend_string* key)        inout => zend_hash_find(&this, key);
+    inout(zval)* get(scope const(char)[] key) inout @system => zend_hash_str_find(&this, key.ptr, key.length);
     alias opBinaryRight(string op : "in") = get;
     alias opIndex = get;
 
-    zval* set(long key, zval* val)                    => zend_hash_index_update(&this, key, val);
-    zval* set(scope const(char)[] key, zval* val)     => zend_hash_str_update(&this, key.ptr, key.length, val);
-    zval* set(zend_string* key, zval* val)            => zend_hash_update(&this, key, val);
-    zval* set(Key key, zval* val)                     => key.str ? set(key.str, val) : set(key.lval, val);
-    zval* opIndexAssign(zval* val, long key)          => zend_hash_index_update(&this, key, val);
-    zval* opIndexAssign(zval* val, const(char)[] key) => zend_hash_str_update(&this, key.ptr, key.length, val);
-    zval* opIndexAssign(zval* val, zend_string* key)  => zend_hash_update(&this, key, val);
+    zval* set(Key key, scope zval* val)          => key.str ? set(key.str, val) : set(key.lval, val);
+    zval* set(long key, scope zval* val)         => zend_hash_index_update(&this, key, val);
+    zval* set(zend_string* key, scope zval* val) => zend_hash_update(&this, key, val);
+    zval* set(scope const(char)[] key, scope zval* val) @system => zend_hash_str_update(&this, key.ptr, key.length, val);
+
+    zval* opIndexAssign(scope zval* val, long key)         => zend_hash_index_update(&this, key, val);
+    zval* opIndexAssign(scope zval* val, zend_string* key) => zend_hash_update(&this, key, val);
+    zval* opIndexAssign(scope zval* val, scope const(char)[] key) @system => zend_hash_str_update(&this, key.ptr, key.length, val);
 
   }
 
@@ -1722,7 +1950,7 @@ struct HashTable {
     zend_hash_next_index_insert(&this, value);
   }
 
-  void append(scope zval value) @nogc nothrow {
+  void append(zval value) @nogc nothrow {
     zend_hash_next_index_insert(&this, &value);
   }
 
@@ -1795,14 +2023,14 @@ struct HashTable {
 
 
   // these functions are templated to prevent generating and compiling unused variants
-  auto byValue()()          { return HTIterator!("v", false)(&this); }
-  auto byValue()() const    { return HTIterator!("v", true)(&this); }
-  auto byKey()()            { return HTIterator!("k", false)(&this); }
-  auto byKey()() const      { return HTIterator!("k", true)(&this); }
+  @nogc auto byValue()()          { return HTIterator!("v", false)(&this); }
+  @nogc auto byValue()() const    { return HTIterator!("v", true)(&this); }
+  @nogc auto byKey()()            { return HTIterator!("k", false)(&this); }
+  @nogc auto byKey()() const      { return HTIterator!("k", true)(&this); }
   /// iterate over `struct KV { zval key; zval* value; }`
-  auto byKeyValue()()       { return HTIterator!("kv", false)(&this); }
+  @nogc auto byKeyValue()()       { return HTIterator!("kv", false)(&this); }
   /// iterate over `struct KV { const(zval) key; const(zval)* value; }`
-  auto byKeyValue()() const { return HTIterator!("kv", true)(&this); }
+  @nogc auto byKeyValue()() const { return HTIterator!("kv", true)(&this); }
 
 
   /**
@@ -1851,6 +2079,7 @@ struct HashTable {
 
   private auto _typed(alias bool convertKeys)() @nogc inout nothrow {
     static struct Iter {
+      @nogc:
       HashTable* ht;
 
       static struct IterState {
@@ -1892,14 +2121,23 @@ struct HashTable {
         return 0;
       };
 
-      int opApply(V)(scope int delegate(ref V) nothrow dg) nothrow if (!canParseZvalThrow!V) { mixin(opApply1); }
-      int opApply(V)(scope int delegate(ref V) dg) { mixin(opApply1); }
-      int opApply(K, V)(scope int delegate(ref K, ref V) nothrow dg) nothrow if (!canExtractKeyFail!K && !canParseZvalThrow!V) { mixin(opApply2); }
-      int opApply(K, V)(scope int delegate(ref K, ref V) dg) { mixin(opApply2); }
+      int opApply(V)(scope int delegate(ref V) @nogc nothrow dg) nothrow if (!canParseZvalThrow!V) { mixin(opApply1); }
+      int opApply(V)(scope int delegate(ref V) @nogc dg) { mixin(opApply1); }
+      int opApply(K, V)(scope int delegate(ref K, ref V) @nogc nothrow dg) nothrow if (!canExtractKeyFail!K && !canParseZvalThrow!V) { mixin(opApply2); }
+      int opApply(K, V)(scope int delegate(ref K, ref V) @nogc dg) { mixin(opApply2); }
     }
 
     return inout(Iter)(&this);
   }
+}
+
+enum {
+  HASH_FLAG_CONSISTENCY         = ((1<<0) | (1<<1)),
+  HASH_FLAG_PACKED              = (1<<2),
+  HASH_FLAG_UNINITIALIZED       = (1<<3),
+  HASH_FLAG_STATIC_KEYS         = (1<<4), /* long and interned strings */
+  HASH_FLAG_HAS_EMPTY_IND       = (1<<5),
+  HASH_FLAG_ALLOW_COW_VIOLATION = (1<<6),
 }
 
 
@@ -1989,13 +2227,13 @@ struct zend_object {
   zval[1]          properties_table;
 
   pragma(inline, true)
-  zval* readProperty(const(char)[] propName, zval* rv) nothrow {
-    return zend_read_property(ce, &this, propName.ptr, propName.length, false, rv);
+  zval* readProperty(scope const(char)[] propName, scope zval* rv) nothrow {
+    return zend_read_property(ce, &this, &propName[0], propName.length, false, rv);
   }
 
   pragma(inline, true)
-  void writeProperty(const(char)[] propName, zval* value) nothrow {
-    zend_update_property(ce, &this, propName.ptr, propName.length, value);
+  void writeProperty(const(char)[] propName, scope zval* value) nothrow {
+    zend_update_property(ce, &this, &propName[0], propName.length, value);
   }
 
   pragma(inline, true)
@@ -2019,7 +2257,8 @@ struct zend_object {
     fci.size = fci.sizeof;
     fci.object = &this;
     fci.function_name = zval(methodName);
-    return callFCCWithArgs!(zval*, Args)(&fci, null, args, rv); // may throw
+    callFCCWithArgs!(zval*, Args)(&fci, null, args, rv); // may throw
+    return rv;
   }
 
   T call(alias methodName, T = zval, Args...)(Args args) {
@@ -2058,7 +2297,7 @@ private RT callFCCWithArgs(RT, Args...)(zend_fcall_info* fci, zend_fcall_info_ca
 
   zend_object* ex = currentException();
   if (unlikely(ex != null)) {
-    return handleException(ex);
+    return handlePHPException(ex);
   }
 
   return extractValue!RT(rv);
@@ -2066,20 +2305,21 @@ private RT callFCCWithArgs(RT, Args...)(zend_fcall_info* fci, zend_fcall_info_ca
 
 static if (ExceptionsAllowed)
 pragma(inline, false) @hidden
-private noreturn handleException(zend_object* ex) @nogc {
-  zval tmp = zval(ex);
-  zend_string* msg = zval_get_string_func(&tmp);
+private noreturn handlePHPException(zend_object* ex) @nogc {
+  zval z;
+  zval* msg_ = ex.readProperty("message", &z);
+  zend_string* msg = zval_get_string_func(msg_); // this is released by PHPException destructor
   zend_clear_exception();
-  throw new PHPException(msg.ptr, ex.ce, msg);
+  throw new PHPException(null, ex.ce, msg);
 }
 
 
 enum {
   BP_VAR_R        = 0,
   BP_VAR_W        = 1,
-  BP_VAR_RW        = 2,
-  BP_VAR_IS        = 3,
-  BP_VAR_FUNC_ARG  =  4,
+  BP_VAR_RW       = 2,
+  BP_VAR_IS       = 3,
+  BP_VAR_FUNC_ARG = 4,
   BP_VAR_UNSET    = 5,
 }
 
@@ -2110,98 +2350,98 @@ struct zend_class_entry {
   static if (PHPVersion >= 86)
   uint ce_flags2;
 
-	int default_properties_count;
-	int default_static_members_count;
-	zval *default_properties_table;
-	zval *default_static_members_table;
+  int default_properties_count;
+  int default_static_members_count;
+  zval *default_properties_table;
+  zval *default_static_members_table;
   void* static_members_table__ptr; //ZEND_MAP_PTR_DEF(zval *, static_members_table);
-	HashTable function_table;
-	HashTable properties_info;
-	HashTable constants_table;
+  HashTable function_table;
+  HashTable properties_info;
+  HashTable constants_table;
 
   void* mutable_data__ptr; //ZEND_MAP_PTR_DEF(zend_class_mutable_data*, mutable_data);
   void* inheritance_cache; //zend_inheritance_cache_entry *inheritance_cache;
 
   void* properties_info_table; //struct _zend_property_info **properties_info_table;
 
-	zend_function *constructor;
-	zend_function *destructor;
-	zend_function *clone;
-	zend_function *__get;
-	zend_function *__set;
-	zend_function *__unset;
-	zend_function *__isset;
-	zend_function *__call;
-	zend_function *__callstatic;
-	zend_function *__tostring;
-	zend_function *__debugInfo;
-	zend_function *__serialize;
-	zend_function *__unserialize;
+  zend_function *constructor;
+  zend_function *destructor;
+  zend_function *clone;
+  zend_function *__get;
+  zend_function *__set;
+  zend_function *__unset;
+  zend_function *__isset;
+  zend_function *__call;
+  zend_function *__callstatic;
+  zend_function *__tostring;
+  zend_function *__debugInfo;
+  zend_function *__serialize;
+  zend_function *__unserialize;
 
   static if (PHPVersion >= 83)
-	const(zend_object_handlers)* default_object_handlers;
+  const(zend_object_handlers)* default_object_handlers;
 
-	/* allocated only if class implements Iterator or IteratorAggregate interface */
-	//zend_class_iterator_funcs* iterator_funcs_ptr;
-	void* iterator_funcs_ptr;
-	/* allocated only if class implements ArrayAccess interface */
-	//zend_class_arrayaccess_funcs *arrayaccess_funcs_ptr;
-	void *arrayaccess_funcs_ptr;
+  /* allocated only if class implements Iterator or IteratorAggregate interface */
+  //zend_class_iterator_funcs* iterator_funcs_ptr;
+  void* iterator_funcs_ptr;
+  /* allocated only if class implements ArrayAccess interface */
+  //zend_class_arrayaccess_funcs *arrayaccess_funcs_ptr;
+  void *arrayaccess_funcs_ptr;
 
-	/* handlers */
-	union {
-		zend_object* function(zend_class_entry *class_type) create_object;
-		int function(zend_class_entry *iface, zend_class_entry *class_type) interface_gets_implemented; /* a class implements this interface */
-	};
-	void *function(zend_class_entry *ce, zval *object, int by_ref) nothrow get_iterator;
-	zend_function *function(zend_class_entry *ce, zend_string* method) get_static_method;
+  /* handlers */
+  union {
+    zend_object* function(zend_class_entry *class_type) create_object;
+    int function(zend_class_entry *iface, zend_class_entry *class_type) interface_gets_implemented; /* a class implements this interface */
+  };
+  void *function(zend_class_entry *ce, zval *object, int by_ref) nothrow get_iterator;
+  zend_function *function(zend_class_entry *ce, zend_string* method) get_static_method;
 
-	/* serializer callbacks */
-	int function(zval *object, ubyte **buffer, size_t *buf_len, zend_serialize_data *data) serialize;
-	int function(zval *object, zend_class_entry *ce, const(ubyte) *buf, size_t buf_len, zend_unserialize_data *data) unserialize;
+  /* serializer callbacks */
+  int function(zval *object, ubyte **buffer, size_t *buf_len, zend_serialize_data *data) serialize;
+  int function(zval *object, zend_class_entry *ce, const(ubyte) *buf, size_t buf_len, zend_unserialize_data *data) unserialize;
 
-	uint num_interfaces;
-	uint num_traits;
+  uint num_interfaces;
+  uint num_traits;
   static if (PHPVersion >= 84)
-	uint num_hooked_props;
+  uint num_hooked_props;
   static if (PHPVersion >= 84)
-	uint num_hooked_prop_variance_checks;
+  uint num_hooked_prop_variance_checks;
 
-	/* class_entry or string(s) depending on ZEND_ACC_LINKED */
-	union {
-		zend_class_entry **interfaces;
-		zend_class_name *interface_names;
-	};
+  /* class_entry or string(s) depending on ZEND_ACC_LINKED */
+  union {
+    zend_class_entry **interfaces;
+    zend_class_name *interface_names;
+  };
 
-	//zend_class_name *trait_names;
-	void *trait_names;
-	//zend_trait_alias **trait_aliases;
-	void *trait_aliases;
-	//zend_trait_precedence **trait_precedences;
-	void *trait_precedences;
-	HashTable *attributes;
+  //zend_class_name *trait_names;
+  void *trait_names;
+  //zend_trait_alias **trait_aliases;
+  void *trait_aliases;
+  //zend_trait_precedence **trait_precedences;
+  void *trait_precedences;
+  HashTable *attributes;
 
-	uint enum_backing_type;
-	HashTable *backed_enum_table;
+  uint enum_backing_type;
+  HashTable *backed_enum_table;
 
   static if (PHPVersion >= 84)
-	zend_string *doc_comment;
+  zend_string *doc_comment;
 
-	static union _info {
-		static struct _user {
-			zend_string *filename;
-			uint line_start;
-			uint line_end;
+  static union _info {
+    static struct _user {
+      zend_string *filename;
+      uint line_start;
+      uint line_end;
       static if (PHPVersion <= 83)
       zend_string *doc_comment;
-		}
+    }
     _user user;
-		static struct _internal {
-			const(zend_function_entry) *builtin_functions;
-			zend_module_entry *_module;
-		}
+    static struct _internal {
+      const(zend_function_entry) *builtin_functions;
+      zend_module_entry *_module;
+    }
     _internal internal;
-	}
+  }
   _info info;
 }
 
@@ -2238,35 +2478,35 @@ alias zend_object_get_gc_t = HashTable *function(zend_object *object, zval **tab
 alias zend_object_do_operation_t = zend_result function(ubyte opcode, zval *result, zval *op1, zval *op2);
 
 struct zend_object_handlers {
-	/* offset of real object header (usually zero) */
-	int										offset;
-	/* object handlers */
-	zend_object_free_obj_t					free_obj;             /* required */
-	zend_object_dtor_obj_t					dtor_obj;             /* required */
-	zend_object_clone_obj_t					clone_obj;            /* optional */
+  /* offset of real object header (usually zero) */
+  int offset;
+  /* object handlers */
+  zend_object_free_obj_t           free_obj;             /* required */
+  zend_object_dtor_obj_t           dtor_obj;             /* required */
+  zend_object_clone_obj_t          clone_obj;            /* optional */
   static if (PHPVersion >= 85)
-	zend_object_clone_obj_with_t			clone_obj_with;       /* optional */
-	zend_object_read_property_t				read_property;        /* required */
-	zend_object_write_property_t			write_property;       /* required */
-	zend_object_read_dimension_t			read_dimension;       /* required */
-	zend_object_write_dimension_t			write_dimension;      /* required */
-	zend_object_get_property_ptr_ptr_t		get_property_ptr_ptr; /* required */
-	zend_object_has_property_t				has_property;         /* required */
-	zend_object_unset_property_t			unset_property;       /* required */
-	zend_object_has_dimension_t				has_dimension;        /* required */
-	zend_object_unset_dimension_t			unset_dimension;      /* required */
-	zend_object_get_properties_t			get_properties;       /* required */
-	zend_object_get_method_t				get_method;           /* required */
-	zend_object_get_constructor_t			get_constructor;      /* required */
-	zend_object_get_class_name_t			get_class_name;       /* required */
-	zend_object_cast_t						cast_object;          /* required */
-	zend_object_count_elements_t			count_elements;       /* optional */
-	zend_object_get_debug_info_t			get_debug_info;       /* optional */
-	zend_object_get_closure_t				get_closure;          /* optional */
-	zend_object_get_gc_t					get_gc;               /* required */
-	zend_object_do_operation_t				do_operation;         /* optional */
-	zend_object_compare_t					compare;              /* required */
-	zend_object_get_properties_for_t		get_properties_for;   /* optional */
+  zend_object_clone_obj_with_t     clone_obj_with;       /* optional */
+  zend_object_read_property_t      read_property;        /* required */
+  zend_object_write_property_t     write_property;       /* required */
+  zend_object_read_dimension_t     read_dimension;       /* required */
+  zend_object_write_dimension_t    write_dimension;      /* required */
+  zend_object_get_property_ptr_ptr_t get_property_ptr_ptr; /* required */
+  zend_object_has_property_t       has_property;         /* required */
+  zend_object_unset_property_t     unset_property;       /* required */
+  zend_object_has_dimension_t      has_dimension;        /* required */
+  zend_object_unset_dimension_t    unset_dimension;      /* required */
+  zend_object_get_properties_t     get_properties;       /* required */
+  zend_object_get_method_t         get_method;           /* required */
+  zend_object_get_constructor_t    get_constructor;      /* required */
+  zend_object_get_class_name_t     get_class_name;       /* required */
+  zend_object_cast_t               cast_object;          /* required */
+  zend_object_count_elements_t     count_elements;       /* optional */
+  zend_object_get_debug_info_t     get_debug_info;       /* optional */
+  zend_object_get_closure_t        get_closure;          /* optional */
+  zend_object_get_gc_t             get_gc;               /* required */
+  zend_object_do_operation_t       do_operation;         /* optional */
+  zend_object_compare_t            compare;              /* required */
+  zend_object_get_properties_for_t get_properties_for;   /* optional */
 }
 
 
@@ -2281,6 +2521,9 @@ enum phpResource;
 enum FFI;
 enum userspaceClass;
 enum phpConstant;
+struct namespace { string namespace; }
+enum requestInit; // TODO
+enum requestShutdown; // TODO
 
 private template hasAttribute(T, A) {
   enum _is(alias a) = is(a == A);
@@ -2297,6 +2540,26 @@ enum isFFIType(T)  = hasAttribute!(T, FFI);
 enum isUserspaceClass(T) = hasAttribute!(T, userspaceClass);
 enum isPHPConstant(alias sym) = hasAttribute_!(__traits(getAttributes, sym), phpConstant);
 
+private template namespaceOf(alias T) {
+  alias ns = AliasSeq!();
+  static foreach (attr; __traits(getAttributes, T)) {
+    static if (is(typeof(attr) == namespace)) {
+      ns = AliasSeq!(ns, attr.namespace);
+    }
+  }
+  static if (ns.length == 0) {
+    enum namespaceOf = "";
+  } else {
+    enum namespaceOf = ns[0];
+  }
+}
+private template nameWithNamespace(alias T, alias name) {
+  enum ns = namespaceOf!T;
+  enum nameWithNamespace = (ns.length > 0 ? ns ~ "\\" : "") ~ name;
+}
+
+
+
 private enum isNullable(attrs...)  = hasAttribute_!(nullable, attrs);
 
 
@@ -2305,35 +2568,18 @@ private enum isNullable(attrs...)  = hasAttribute_!(nullable, attrs);
 
 
 
-/// Wraps type T into PHP class and delegates all operations of T to be
-/// acessible from Class!T.
-@phpClass
-struct Class(T, alias string className = "") {
-  enum _className = className;
-  T _value;
-  zend_object _zobj;
-  alias this = _value;
-}
-
-
-
 zend_class_entry* registerClass(T)() {
   return phpClassRegistry!T.register();
 }
 
-template phpClassRegistry(T) {
+template phpClassRegistry(T) if (is(typeof(T.tupleof[$-1]) == zend_object)) {
   @nogc nothrow:
 
-  static if (is(T == Class!C, C)) {
-    enum className = T._className != "" ? T._className : __traits(identifier, C);
-    private alias methodNames = PublicMethods!C;
-  } else {
-    enum className = __traits(identifier, T);
-    private alias methodNames = PublicMethods!T;
-  }
+  enum className = nameWithNamespace!(T, __traits(identifier, T));
+  private alias methodNames = PublicMethods!T;
 
-  static __gshared zend_class_entry *class_entry;
-  static __gshared zend_object_handlers handlers;
+  static zend_class_entry *class_entry;
+  static zend_object_handlers handlers;
 
   /**
    * Returns: The class entry that can be further modified
@@ -2341,14 +2587,9 @@ template phpClassRegistry(T) {
   zend_class_entry* register() {
     static assert(is(T == struct), "PHP class has to be implemented as a native struct (not a class)");
     static assert(is(typeof(T.tupleof[$-1]) : const(zend_object)), "last field of a struct implementing PHP class has to be zend_object");
+    assert(class_entry == null, "class registered twice");
 
-    static if (is(T == Class!C, C)) {
-      alias RealT = C;
-    } else {
-      alias RealT = T;
-    }
-    immutable static zend_function_entry[methodNames.length + 1] functions = [MakeMethods!(RealT, methodNames)];
-
+    immutable static zend_function_entry[methodNames.length + 1] functions = [MakeMethods!(T, methodNames)];
 
     handlers = std_object_handlers;
     handlers.offset = T.tupleof[$-1].offsetof;
@@ -2363,7 +2604,12 @@ template phpClassRegistry(T) {
       ce.info.internal.builtin_functions = functions.ptr; // do this before zend_register_internal_class
     }
 
-    class_entry = zend_register_internal_class_with_flags(&ce, null, ZEND_ACC_FINAL);
+    static if (PHPVersion >= 84) {
+      class_entry = zend_register_internal_class_with_flags(&ce, null, ZEND_ACC_FINAL);
+    } else {
+      class_entry = zend_register_internal_class_ex(&ce, null);
+    }
+
 
     // this have to happen after zend_register_internal_class_with_flags (which
     // resets default_object_handlers and some other fields)
@@ -2376,12 +2622,13 @@ template phpClassRegistry(T) {
   }
 
   pragma(inline, true)
-  T* getNativeType(zend_object* obj) {
+  T* getNativeType(zend_object* obj) @trusted {
+    debug assert(obj.ce == class_entry);
     return cast(T*) ((cast(ubyte*) obj) - T.tupleof[$-1].offsetof);
   }
 
   pragma(inline, true)
-  zend_object* getPHPType(T* x) {
+  zend_object* getPHPType(T* x) @trusted {
     return cast(zend_object*) ((cast(ubyte*) x) + T.tupleof[$-1].offsetof);
   }
 }
@@ -2393,7 +2640,6 @@ private void registerClassConstants(T)(zend_class_entry* ce) {
         __traits(compiles, { enum x = mixin("T.", sym); }) &&
         !__traits(isStaticFunction, __traits(getMember, T, sym))
     ) {
-      //pragma(msg, T, " ", sym, " ", mixin("T.", sym), " ", sf);
       registerClassConstant!(typeof(mixin("T.", sym)))(ce, sym, mixin("T.", sym));
     }
   }
@@ -2415,21 +2661,21 @@ private void registerClassConstant(V)(zend_class_entry* ce, const(char)[] name, 
 /**
 object construction sequence:
 
-interpreter
+ZEND_NEW_*_UNUSED_HANDLER (interpreter)
   object_init_ex()
     _object_and_properties_init(obj, ce, properties: null)
       if ce.create_object == null (for userspace classes)
         zend_objects_new()
           emalloc()
-          _zend_object_std_init() (sets fixed zend_object fields)
+          _zend_object_std_init() (sets fixed zend_object fields, RC = 1)
         _object_properties_init (sets properties to default value)
       else
         ce.create_object(ce)
           (This is defined here in extension code. We need to emalloc memory,
           default initialize native object prefix and call zend_object_std_init
           to initialize zend_object field that is managed by PHP.)
-  obj.handlers.get_constructor(obj)
-  call __construct()
+  __construct = obj.handlers.get_constructor(obj)
+  __construct()
 */
 private zend_object* createObject(T)(zend_class_entry* ce) @nogc nothrow {
   // Our native classes have no declared properties.
@@ -2439,6 +2685,7 @@ private zend_object* createObject(T)(zend_class_entry* ce) @nogc nothrow {
   // see: zend_object_alloc
   auto useGuards = ce.ce_flags & ZEND_ACC_USE_GUARDS;
   size_t size = T.sizeof - (useGuards ? 0 : zval.sizeof);
+
   T* obj = cast(T*) _emalloc(size);
 
   // default initialize native prefix before zend_object field
@@ -2453,6 +2700,7 @@ private zend_object* createObject(T)(zend_class_entry* ce) @nogc nothrow {
 
   //emplace!T(obj);
   zend_object_std_init(&obj.tupleof[$-1], ce);
+
   return &obj.tupleof[$-1];
 }
 
@@ -2539,23 +2787,13 @@ template MakeMethod(T, alias string method) {
 }
 
 template MakeConstructor(T) {
+  static assert(is(typeof(T.tupleof[$-1]) == zend_object), "sanity check " ~ T.stringof ~ " " ~ typeof(T.tupleof[$-1]).stringof);
+
   static if (__traits(compiles, T.__ctor)) {
     static if (is(typeof(T.__ctor) ParamTypes == __parameters)) {}
     pragma(inline, true)
     static void MakeConstructor(zend_object* obj, scope ParamTypes args) {
       T* _this = cast(T*) ((cast(ubyte*) obj) - T.tupleof[$-1].offsetof);
-      //pragma(msg, typeof(_this.__ctor));
-      _this.__ctor(args);
-    }
-
-  } else static if (is(T == Class!C, C)) {
-    // handle case when PHP class is declared by `alias X = Class!SomeStruct`
-    // which exposes functionality of `SomeStruct` by `alias this = xxx`
-    static assert(is(typeof(T.tupleof[$-1]) == zend_object), "sanity check");
-    private alias argTypes = Parameters!(C.__ctor);
-    pragma(inline, true)
-    static void MakeConstructor(zend_object* obj, scope argTypes args) {
-      C* _this = cast(C*) ((cast(ubyte*) obj) - T.tupleof[$-1].offsetof); // last T is intentional
       _this.__ctor(args);
     }
 
@@ -2590,7 +2828,7 @@ struct zend_resource {
   int               type;
   void*             ptr;
 
-  int fileno() {
+  int fileno() @system {
     if (type != php_file_le_stream()) return -1;
     void* ret;
     _php_stream_cast(cast(php_stream*) ptr, 1, &ret, 0);
@@ -2642,44 +2880,46 @@ struct phpResourceRegistry(T) {
 }
 
 
-
 // === function value ====
 
 // copy-pasted
 struct zend_fcall_info {
-	size_t size;
-	zval function_name;
-	zval *retval;
-	zval *params;
-	zend_object *object;
-	uint param_count;
-	/* This hashtable can also contain positional arguments (with integer keys),
-	 * which will be appended to the normal params[]. This makes it easier to
-	 * integrate APIs like call_user_func_array(). The usual restriction that
-	 * there may not be position arguments after named arguments applies. */
-	HashTable *named_params;
+  size_t size;
+  zval function_name;
+  zval *retval;
+  zval *params;
+  zend_object *object;
+  uint param_count;
+  /* This hashtable can also contain positional arguments (with integer keys),
+   * which will be appended to the normal params[]. This makes it easier to
+   * integrate APIs like call_user_func_array(). The usual restriction that
+   * there may not be position arguments after named arguments applies. */
+  HashTable *named_params;
   mixin NoToHashFunction;
 }
 
 // copy-pasted
 struct zend_fcall_info_cache {
-	zend_function *function_handler;
-	zend_class_entry *calling_scope;
-	zend_class_entry *called_scope;
-	zend_object *object; /* Instance of object for method calls */
+  zend_function *function_handler;
+  zend_class_entry *calling_scope;
+  zend_class_entry *called_scope;
+  zend_object *object; /* Instance of object for method calls */
   static if (PHPVersion >= 83)
-	zend_object *closure; /* Closure reference, only if the callable *is* the object */
+  zend_object *closure; /* Closure reference, only if the callable *is* the object */
 }
+
 
 
 // === constants ===
 
 void registerConstant(alias symbol, alias _name = "")(int moduleNumber) @nogc nothrow {
   static if (_name == "") {
-    enum name = __traits(identifier, symbol);
+    enum name0 = __traits(identifier, symbol);
   } else {
-    enum name = _name;
+    enum name0 = _name;
   }
+
+  enum name = nameWithNamespace!(symbol, name0);
 
   auto value = symbol; // evaluate, symbol can be a function
   alias T = typeof(value);
@@ -2692,7 +2932,7 @@ void registerConstant(alias symbol, alias _name = "")(int moduleNumber) @nogc no
   } else static if (is(T : double)) {
     zend_register_double_constant(name, name.length, value, CONST_PERSISTENT, moduleNumber);
   } else static if (is(T : const(char)[])) {
-    zend_register_double_constant(name, name.length, value.ptr, value.length, CONST_PERSISTENT, moduleNumber);
+    zend_register_stringl_constant(name, name.length, value.ptr, value.length, CONST_PERSISTENT, moduleNumber);
   } else static assert(0, "cannot handle const of type " ~ T.stringof);
 }
 
@@ -2715,12 +2955,10 @@ struct zend_module_entry {
   uint zend_api = ZendApi;
   ubyte zend_debug;
   ubyte zts;
-  //const struct _zend_ini_entry *ini_entry;
-  void* ini_entry;
-  //const struct _zend_module_dep *deps;
-  void* deps;
+  const(zend_ini_entry)* ini_entry;
+  const(zend_module_dep)* deps;
   const(char) *name;
-  const zend_function_entry *functions;
+  const(zend_function_entry)* functions;
   zend_result function(int type, int module_number) moduleStartup;
   zend_result function(int type, int module_number) moduleShutdown;
   zend_result function(int type, int module_number) requestStartup;
@@ -2790,15 +3028,15 @@ struct zend_type {
 }
 
 struct zend_execute_data {
-  void* /*const zend_op*/       *opline;           /* executed opline                */
+  const(zend_op)      *opline;           /* executed opline                */
   zend_execute_data   *call;             /* current call                   */
   zval                *return_value;
-  void* /*zend_function*/       *func;             /* executed function              */
+  zend_function       *func;             /* executed function              */
   zval                 This;             /* this + call_info + num_args    */
   zend_execute_data   *prev_execute_data;
-  void* /*zend_array*/          *symbol_table;
+  HashTable           *symbol_table;
   void               **run_time_cache;   /* cache op_array->run_time_cache */
-  void* /*zend_array*/          *extra_named_params;
+  HashTable           *extra_named_params;
   mixin NoToHashFunction;
 }
 
@@ -2816,7 +3054,7 @@ struct zend_execute_data {
 */
 mixin template mod(alias _module, alias string name = "") if (__traits(isModule, _module)) {
   @nogc:
-  private __gshared ModuleEntry __mod = {
+  private static ModuleEntry __mod = {
     name: name == "" ? __traits(identifier, _module) : name,
     version_: "1",
     functions: [
@@ -2911,6 +3149,7 @@ pragma(inline, true) {
       auto str = zend_strpprintf(0, error.ptr, errorArg);
       throw new PHPException(null, null, str);
     }
+    mixin NoToHashFunction;
   }
 
   @hidden private auto TypeBad(T, A)(string error, A arg) @nogc nothrow @safe =>
@@ -3186,8 +3425,8 @@ version (TestParityWithPHP) {
     pragma(msg, "int main(void) {");
 
     // structs and their fields
-    static foreach (S; ListPHPStructs!phpmod) {{
-      enum structName = __traits(identifier, S);
+    static foreach (Struct; ListPHPStructs!phpmod) {{
+      enum structName = __traits(identifier, Struct);
 
       static if (
           !structName.startsWith("zend_ffi_") && // skip ffi types as they are defined in .c file
@@ -3195,13 +3434,22 @@ version (TestParityWithPHP) {
           // it seems we cannot conditionally define top-level structs, we need to omit this one manually
           !(structName == "zend_frameless_function_info" && PHPVersion < 85)
       ) {
-        pragma(msg, `  test("`, structName, `", sizeof(`, S.stringof, `), `, S.sizeof, `);`);
-        static foreach (f; S.tupleof) {{
-          enum f0 = __traits(identifier, f);
-          static if (f0 != "_dummy") {
-            enum field = mungeFieldName(__traits(identifier, f));
-            pragma(msg, `  test("`, structName, `.`, f0, ` offset", offsetof(`, structName, `,     `, field, `), `, f.offsetof, `);`);
-            pragma(msg, `  test("`, structName, `.`, f0, ` sizeof", sizeof(((`, structName, `*)0)->`, field, `), `, f.sizeof, `);`);
+        pragma(msg, `  test("`, structName, `", sizeof(`, Struct.stringof, `), `, Struct.sizeof, `);`);
+        static foreach (f; Struct.tupleof) {{
+          enum fieldName = __traits(identifier, f);
+          static if (fieldName != "_dummy") {
+            enum fieldNameC = mungeFieldName(__traits(identifier, f));
+            pragma(msg, `  test("`, structName, `.`, fieldName, ` offset", offsetof(`, structName, `,     `, fieldNameC, `), `, f.offsetof, `);`);
+            pragma(msg, `  test("`, structName, `.`, fieldName, ` sizeof", sizeof(((`, structName, `*)0)->`, fieldNameC, `), `, f.sizeof, `);`);
+
+            // test pointer types
+            static if (is(typeof(f) == const(T)*, T) && !is(typeof(f) == return)) {
+              pragma(msg, `  { const `, T.stringof, `* val = (&(`, structName, `){})->`, fieldNameC, `; (void)val; }`);
+              pragma(msg, `  { const typeof((&(`, structName, `){})->`, fieldNameC, `) val = (`, T.stringof, `*)0 ; (void)val;}`);
+            } else static if (is(typeof(f) == T*, T) && !is(typeof(f) == return)) {
+              pragma(msg, `  { `, T.stringof, `* val = (&(`, structName, `){})->`, fieldNameC, `; (void)val; }`);
+              pragma(msg, `  { typeof((&(`, structName, `){})->`, fieldNameC, `) val = (`, T.stringof, `*)0 ; (void)val;}`);
+            }
           }
         }}
         pragma(msg, "");
@@ -3209,6 +3457,7 @@ version (TestParityWithPHP) {
     }}
 
     // named enums
+    // enum X { A, B, C }
     static foreach (sym; __traits(allMembers, phpmod)) {
       static if (
           is(mixin(sym) == enum) &&
@@ -3226,13 +3475,15 @@ version (TestParityWithPHP) {
       }}
     }
 
-    // single member anonymous enums
+    // single member and anonymous enums
+    // enum X = 1;
+    // enum { X, Y };
     static foreach (sym; __traits(allMembers, phpmod)) {{
       alias S = mixin(sym);
       static if (
           !__traits(compiles, { return &S; }) &&
           __traits(compiles, { auto a = S; }) &&
-          (sym.canFind("zend_") || sym.canFind("ZEND_") || sym.canFind("IS_") || sym.canFind("GC_") || sym.canFind("BR_")) &&
+          (sym.canFind("zend_") || sym.canFind("ZEND_") || sym.canFind("IS_") || sym.canFind("GC_") || sym.canFind("BR_") || sym.canFind("HASH_")) &&
           !sym.canFind("FFI_")
       ) {
         enum val = mixin(sym);
@@ -3248,7 +3499,7 @@ version (TestParityWithPHP) {
 
 
     template CArg(T) {
-           static if (is(T == ulong))        enum CArg = "(ULONG_MAX/2)"; // because _emalloc TODO
+           static if (is(T == ulong))        enum CArg = "ULONG_MAX";
       else static if (is(T == long))         enum CArg = "LONG_MAX";
       else static if (is(T == uint))         enum CArg = "UINT_MAX";
       else static if (is(T == int))          enum CArg = "INT_MAX";
@@ -3258,7 +3509,8 @@ version (TestParityWithPHP) {
       else static if (is(T == void*))        enum CArg = "(void*)0";
       else static if (is(T == va_list))      enum CArg = "(void*)0";
       else static if (is(T == zend_type))    enum CArg = "(zend_type){}";
-      else static if (is(T == const(U)*, U)) enum CArg = "(const "~U.stringof~"*)0";
+      else static if (is(T == const(U)*, U)) enum CArg = "("~U.stringof~"*)0";
+      else static if (is(T == inout(V)*, V)) enum CArg = "("~V.stringof~"*)0";
       else static if (is(T == U*, U))        enum CArg = "("~U.stringof~"*)0";
       else static assert(0, T);
     }
@@ -3278,15 +3530,19 @@ version (TestParityWithPHP) {
     pragma(msg, "#pragma GCC diagnostic ignored \"-Wunused-parameter\"");
     pragma(msg, "#include <php.h>");
     pragma(msg, "#include <zend_exceptions.h>");
+    pragma(msg, "#include <zend_interfaces.h>");
+
     pragma(msg, "#pragma GCC diagnostic pop");
     pragma(msg, "void xxx(void) {");
 
     pragma(msg, "#define ulong zend_ulong");
     static foreach (sym; __traits(allMembers, phpmod)) {{
       static if (
-          sym != "DebugParams" &&
+          sym != "DebugAllocParams" &&
           sym != "_d_run_main" &&
           sym != "_Dmain" &&
+          sym != "_emalloc" &&
+          sym != "_efree" &&
           __traits(isStaticFunction, mixin(sym)) &&
           __traits(getLinkage, mixin(sym)) == "C" &&
           __traits(identifier, mixin(sym)) == sym // ignore aliases
@@ -3296,7 +3552,12 @@ version (TestParityWithPHP) {
         static if (is(RT == void)) {
           pragma(msg, "{ char warn_if_not_void[_Generic(" ~ sym, "(" ~ GetArgs!Params ~ "), void: 1, default: 0)] = {1}; (void)warn_if_not_void; }");
         } else {
-          pragma(msg, "{ ", RT.stringof, " res = (", sym, ")(" ~ GetArgs!Params ~ "); (void)res; }");
+          static if (is (RT == inout(T)*, T)) {
+            alias RRT = T*;
+          } else {
+            alias RRT = RT;
+          }
+          pragma(msg, "{ ", RRT.stringof, " res = (", sym, ")(" ~ GetArgs!Params ~ "); (void)res; }");
         }
       }}
     }}

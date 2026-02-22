@@ -2,8 +2,8 @@
 
 require_once 'lib.php';
 
-_test(function_exists('c_function_alias'));
-_test(function_exists('c_function_extern'));
+test(__LINE__, function_exists('c_function_alias'));
+test(__LINE__, function_exists('c_function_extern'));
 
 $r = new ReflectionFunction('c_string_arg');
-_test($r->getNumberOfParameters() === 1);
+test(__LINE__, $r->getNumberOfParameters() === 1);

@@ -4,6 +4,8 @@ import core.sys.posix.string;
 import core.sys.posix.fcntl;
 import core.stdc.errno;
 
+@nogc:
+
 ModuleEntry mod = {
   name: "writer",
   version_: "1",
@@ -25,7 +27,7 @@ extern(C) ModuleEntry* get_module() {
 
   // PHP constructor can be also implemented by a native function called
   // `__construct` (same as in PHP).
-  this(scope const(char)[] filename) {
+  this(scope const(char)[] filename) @system {
     fd = .open(filename.ptr, O_WRONLY);
     if (fd == -1) throw new PHPException(strerror(errno));
   }
@@ -38,7 +40,7 @@ extern(C) ModuleEntry* get_module() {
     close();
   }
 
-  long pwrite(scope const(ubyte)[] str, long offset) {
+  long pwrite(scope const(ubyte)[] str, long offset) @system {
     // any exception thrown in native code is caught by auto-generated wrapper
     // and rethrown to PHP as a PHP exception
     if (fd == -1) throw new Exception("file not open");
@@ -49,7 +51,7 @@ extern(C) ModuleEntry* get_module() {
     return rc;
   }
 
-  String* pread(long length, long offset) {
+  String* pread(long length, long offset) @system  {
     if (fd == -1) throw new Exception("file not open");
     // String.alloc(n) allocates n+1 bytes, n of which is usable and the last
     // one is set to zero.
